@@ -65,6 +65,20 @@ describe("without a tenant", () => {
     expect(raw[0]?.n).toBe(0n);
   });
 
+  it("can insert nothing on a connection that never set the tenant (NULL, not '')", async () => {
+    // A fresh one-connection pool: the insert is this session's first statement, so the setting is NULL.
+    // (Round 1: a WITH CHECK that also allowed "setting IS NULL" survived, since the other insert test ran
+    // on a connection where the setting was ''.)
+    const fresh = appDb({ max: 1 });
+    try {
+      await expect(
+        fresh.customer.create({ data: { organizationId: a.orgId, name: "x", email: `x-${unique()}@example.com` } }),
+      ).rejects.toThrow(/row-level security/);
+    } finally {
+      await fresh.$disconnect();
+    }
+  });
+
   it("can insert nothing", async () => {
     await expect(
       app.customer.create({ data: { organizationId: a.orgId, name: "x", email: `x-${unique()}@example.com` } }),
@@ -144,7 +158,7 @@ describe("inside withTenant", () => {
     expect(intact.map((c) => c.name).sort()).toEqual(["beta one", "beta two"]);
   });
 
-  it("refuses to insert a row for another tenant", async () => {
+  it("refuses to insert a row for another tenant, in every tenant table", async () => {
     await expect(
       withTenant(
         a.orgId,
@@ -152,6 +166,38 @@ describe("inside withTenant", () => {
         app,
       ),
     ).rejects.toThrow(/row-level security/);
+    // With B's own customer and invoice, so the composite foreign keys are satisfied and only the policy
+    // stands in the way (round 1: WITH CHECK (true) on invoices or lines survived the customers-only test).
+    await expect(
+      withTenant(
+        a.orgId,
+        (tx) => tx.invoice.create({ data: { organizationId: b.orgId, customerId: b.customerIds[0]!, currency: "USD" } }),
+        app,
+      ),
+    ).rejects.toThrow(/row-level security/);
+    await expect(
+      withTenant(
+        a.orgId,
+        (tx) =>
+          tx.invoiceLine.create({
+            data: { organizationId: b.orgId, invoiceId: b.invoiceId, position: 99, description: "x", quantity: "1", unitPriceMinor: 1n },
+          }),
+        app,
+      ),
+    ).rejects.toThrow(/row-level security/);
+  });
+
+  it("lets two tenants each have a customer with the same email (the unique key is per organization)", async () => {
+    const email = `shared-${unique()}@example.com`;
+    // Two fresh tenants, so the shared fixtures' counts stay as the other tests expect.
+    const pair = [await makeTenant(app, "shared-a"), await makeTenant(app, "shared-b")];
+    for (const t of pair) {
+      await withTenant(t.orgId, (tx) => tx.customer.create({ data: { organizationId: t.orgId, name: "Shared", email } }), app);
+    }
+    const counts = await Promise.all(
+      pair.map((t) => withTenant(t.orgId, (tx) => tx.customer.count({ where: { email } }), app)),
+    );
+    expect(counts).toEqual([1, 1]);
   });
 
   it("refuses to move its own row to another tenant: no grant for the app, and the policy for the owner", async () => {

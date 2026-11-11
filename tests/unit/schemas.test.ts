@@ -26,6 +26,22 @@ describe("signUpInput", () => {
     expect(result.error?.issues.map((i) => i.path[0])).toEqual([field]);
   });
 
+  it("caps an email at 254 characters", () => {
+    const local = "a".repeat(64);
+    const at = (length: number) => `${local}@${"b".repeat(length - local.length - 1 - 4)}.com`;
+    expect(at(254)).toHaveLength(254);
+    expect(signUpInput.safeParse({ ...good, email: at(254).replace(/b{60}/, "b".repeat(59) + ".") }).success).toBe(true);
+    expect(signUpInput.safeParse({ ...good, email: at(255).replace(/b{60}/, "b".repeat(59) + ".") }).success).toBe(false);
+  });
+
+  it("refuses control characters in names, but keeps other Unicode", () => {
+    expect(signUpInput.safeParse({ ...good, name: "Zoë Ünal" }).success).toBe(true);
+    for (const bad of ["Ada\u0000", "Ada\u0007Lovelace", "Ada\tLovelace", "Ada\u007fx"]) {
+      const result = signUpInput.safeParse({ ...good, name: bad });
+      expect(result.success, bad).toBe(false);
+    }
+  });
+
   it("accepts the boundary lengths", () => {
     expect(signUpInput.safeParse({ ...good, password: "x".repeat(10) }).success).toBe(true);
     expect(signUpInput.safeParse({ ...good, password: "x".repeat(128) }).success).toBe(true);

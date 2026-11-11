@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { verifyCredentials } from "@/server/auth/credentials";
-import { verifyPassword } from "@/server/auth/password";
+import { dummyHash, verifyPassword } from "@/server/auth/password";
 import { signUpInput } from "@/server/auth/schemas";
 import { signUp } from "@/server/auth/signup";
 import type { Db } from "@/server/db/client";
@@ -84,6 +84,20 @@ describe("signUp", () => {
   });
 });
 
+describe("signUp on an unexpected database error", () => {
+  it("rethrows it at once instead of retrying it as a slug collision", async () => {
+    let calls = 0;
+    const failing = {
+      $transaction: async () => {
+        calls++;
+        throw new Error("connection reset");
+      },
+    } as unknown as Parameters<typeof signUp>[1];
+    await expect(signUp(input(), failing)).rejects.toThrow("connection reset");
+    expect(calls).toBe(1);
+  });
+});
+
 describe("verifyCredentials", () => {
   let email: string;
   let userId: string;
@@ -94,6 +108,10 @@ describe("verifyCredentials", () => {
     if (!result.ok) throw new Error("sign-up failed");
     email = data.email;
     userId = result.userId;
+    // Made once per process: build it now, so the timing test below measures the verification itself
+    // (round 1: replacing the verification with a bare `await dummyHash()` survived, because the first
+    // call built the hash with one scrypt).
+    await dummyHash();
   });
 
   it("returns the user for the right password, with the email in any case", async () => {

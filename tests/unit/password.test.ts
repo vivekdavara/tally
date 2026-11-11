@@ -83,6 +83,24 @@ describe("parseHash", () => {
   });
 });
 
+describe("parseHash at the bounds", () => {
+  const b64 = (bytes: number) => Buffer.alloc(bytes, 7).toString("base64url");
+  const hash = (salt: number, key: number) => ["scrypt", 2 ** 15, 8, 1, b64(salt), b64(key)].join("$");
+
+  it.each([
+    [16, 32, true],
+    [15, 32, false],
+    [64, 32, true],
+    [65, 32, false],
+    [16, 16, true],
+    [16, 15, false],
+    [16, 64, true],
+    [16, 65, false],
+  ])("salt %i bytes, key %i bytes: accepted %s", (salt, key, accepted) => {
+    expect(parseHash(hash(salt, key)) !== null).toBe(accepted);
+  });
+});
+
 describe("dummyHash", () => {
   it("is one well-formed hash per process that no ordinary password verifies against", async () => {
     const [a, b] = await Promise.all([dummyHash(), dummyHash()]);

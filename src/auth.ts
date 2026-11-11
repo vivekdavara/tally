@@ -1,6 +1,7 @@
 import NextAuth, { CredentialsSignin } from "next-auth";
 import Credentials from "next-auth/providers/credentials";
 import { verifyCredentials } from "@/server/auth/credentials";
+import { jwtCallback, sessionCallback } from "@/server/auth/session-callbacks";
 
 // DESIGN.md, "Authentication". Credentials sessions must be JWTs in Auth.js; the cookie carries only the
 // user's id (`sub`), and everything a user may do is read from the database on each request.
@@ -28,18 +29,7 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
     }),
   ],
   callbacks: {
-    // Keep the token minimal: the user's id is all the application reads from it.
-    jwt({ token, user }) {
-      if (user?.id) {
-        token.sub = user.id;
-      }
-      return { sub: token.sub, iat: token.iat, exp: token.exp, jti: token.jti };
-    },
-    session({ session, token }) {
-      if (token.sub) {
-        session.user.id = token.sub;
-      }
-      return session;
-    },
+    jwt: ({ token, user }) => jwtCallback({ token, user }),
+    session: ({ session, token }) => sessionCallback({ session, token }),
   },
 });
