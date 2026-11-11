@@ -98,24 +98,25 @@ and everything else runs.
 
 All measured on an Apple M3 laptop (macOS 26.6.2, Node 23.11, Postgres 14.20), on AC power.
 
-- **Tests:** 188 Vitest tests (`npx vitest run`, 13.6 s with files run one at a time): 74 unit (including two
-  architecture rules over the source), 93 integration tests against Postgres, mostly as `tally_app`, and 21 from the
-  review rounds (`tests/review/`); 11 Playwright tests (`npm run e2e`, 6.1 s). Every CI step passed in a fresh clone
+- **Tests:** 209 Vitest tests (`npx vitest run`, about 20 s with files run one at a time): unit, integration tests
+  against Postgres (mostly as `tally_app`), two architecture rules over the source, and the review rounds' tests
+  (`tests/review/`, `tests/review2/`); 11 Playwright tests (`npm run e2e`, 6.5 s). Every CI step passed in a fresh clone
   of the repository.
 - **The cost of isolation** (`npm run bench`, synthetic: 100 tenants x 1,000 customers; one tenant's customer count,
-  3,000 times per path, interleaved; one connection each; load average 3.0 with a review agent running):
+  3,000 times per path, interleaved; one connection each; load average 3.4; final code):
 
   | Path | p50 | p95 | p99 |
   |---|---|---|---|
-  | superuser, explicit `WHERE`, no RLS (one round trip) | 393 µs | 557 µs | 678 µs |
-  | `withTenant` (RLS adds the filter) | 851 µs | 1,546 µs | 1,891 µs |
-  | `withTenant` plus an explicit `WHERE` | 858 µs | 1,464 µs | 1,871 µs |
+  | superuser, explicit `WHERE`, no RLS (one round trip) | 409 µs | 527 µs | 654 µs |
+  | `withTenant` (RLS adds the filter) | 914 µs | 1,314 µs | 1,927 µs |
+  | `withTenant` plus an explicit `WHERE` | 919 µs | 1,345 µs | 2,253 µs |
 
-  The cost is the four extra round trips (`BEGIN`, `set_config`, the `SELECT 1` that catches an aborted transaction,
-  `COMMIT`), paid once per request rather than per query; not the policy: Postgres plans the RLS query and the explicit
-  one the same way, a bitmap index scan on `customers_organization_id_id_key` (`tests/integration/rls-plan.test.ts`
-  pins that the policy can use an index). Before the review's fixes added the `SELECT 1`, the same run gave 426 /
-  783 / 794 µs at the median (load 3.9).
+  The cost is the four extra round trips (`BEGIN`, one `set_config` statement for the tenant and the timeouts, the
+  `SELECT 1` that catches an aborted transaction, `COMMIT`), paid once per request rather than per query; not the
+  policy: Postgres plans the RLS query and the explicit one the same way, a bitmap index scan on
+  `customers_organization_id_id_key` (`tests/integration/rls-plan.test.ts` pins that the policy can use an index).
+  Earlier runs, before the reviews' fixes: 426 / 783 / 794 µs at the median (load 3.9, no `SELECT 1`), then 393 /
+  851 / 858 µs (load 3.0).
 - **Password hashing:** one scrypt (N = 2^15, r = 8, p = 1) takes 45.5 ms at the median (20 runs, min 45.4, max
   46.7: a `node -e` timing loop over `crypto.scrypt`).
 - **Sign-in timing doesn't reveal accounts** (`npm run bench:signin`: the whole credential check, 200 attempts of
@@ -142,6 +143,14 @@ finding as a failing test (`tests/review/`).
   error reported as success; a role check that passed with an extra `USING (true)` policy. Also a startup check
   that could hang, unverifiable hash parameters, a NUL byte making sign-up a 500, and the deleted-user redirect loop
   (already fixed). Plus 18 surviving mutants, each now killed by a test. Fixes: `e98f346` and the commits before it.
+- **Round 2** (at `e98f346`, on round 1's fixes): five bugs. A transaction that hit Prisma's own timeout still
+  committed part of a nested write (statements are now bounded by `lock_timeout` and `statement_timeout` well inside
+  a 30 s transaction timeout); the tracking view broke Prisma's fluent API; another organization's name and slug
+  were still writable (the app may no longer update organizations); the role check passed a superuser session that
+  set its role, `UPDATE` on users, an executable `SECURITY DEFINER` function and membership in `pg_write_all_data`;
+  `parseHash` accepted hashes no scrypt can run. Plus 12 surviving mutants: 11 now fail tests; the wait for
+  in-flight queries before `COMMIT` still survives its test (the `SELECT 1` orders `COMMIT` after the plan in every
+  case I could build) and stays as a guard. Fixes: `41d7c03`, `1eaaacf`.
 
 ## Design decisions
 
@@ -150,6 +159,9 @@ finding as a failing test (`tests/review/`).
 - **A transaction per tenant request.** `set_config(..., true)` only lives inside a transaction, which is what makes
   it safe with a connection pool (and with PgBouncer in transaction mode). The price is three round trips per
   request, measured above.
+- **A Prisma behaviour to report upstream.** When an interactive transaction ends (rejection or Prisma's timeout)
+  while an operation's multi-query plan is running, the rest of the plan runs in autocommit on the released
+  connection. `withTenant` works around it; the reproductions are in `tests/review2/orphan-writes.test.ts`.
 - **Least privilege, column by column.** Some writes skip row security even for the app role (cascades, unique-key
   checks), so its grants leave out everything those could abuse; the startup check verifies the grants and policies
   are exactly the migrations'.

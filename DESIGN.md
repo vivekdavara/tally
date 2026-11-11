@@ -91,6 +91,9 @@ Two guards around `fn` keep the transaction's outcome and its writes in agreemen
   (a nested write) then runs outside any transaction and commits. `fn` therefore gets a view of the transaction
   that records each Prisma promise once it starts, and `withTenant` waits for all of them before rolling back or
   committing.
+- **No statement outlives the transaction.** Prisma's own transaction timeout does the same release mid-plan
+  (review round 2), so `withTenant` sets `lock_timeout` (2 s) and `statement_timeout` (5 s) locally, in the same
+  statement as the tenant, and gives Prisma a 30 s timeout: a stuck statement fails inside the transaction first.
 - **No success for an aborted transaction.** If `fn` catches a database error and returns, Postgres has already
   aborted the transaction and answers `COMMIT` with a silent `ROLLBACK`. One `SELECT 1` after `fn` turns that into
   an error instead of a success for writes that were never stored.
@@ -131,15 +134,21 @@ owner skips them unless the table is `FORCE`d.** So there are two roles:
 | `tally_owner` | migrations (`prisma migrate deploy`) | owns the schema's tables; DDL |
 | `tally_app` | the running application, tests of isolation | `SELECT` on the application's tables, and `INSERT`/`UPDATE`/`DELETE` granted **column by column** (`*_least_privilege`): never on `id` or `organization_id`, no `DELETE` on `users` or `organizations`, no `TRUNCATE`, `REFERENCES` or `TRIGGER`. `NOSUPERUSER NOBYPASSRLS`, owns nothing |
 
+Organizations can't be updated by the app at all (review round 2: with no RLS on organizations, `UPDATE (name, slug)`
+let one tenant rename another or take its slug); day 4's settings page will add a policy-guarded path.
+
 The narrow grants matter because some writes run without row security even for `tally_app`: foreign-key actions
 (`ON DELETE CASCADE` from an organization through its customers and invoices) and unique-key checks. So the app may
 not delete organizations or users (an administrator does, as the owner), may not change any id (every key is
 `ON UPDATE NO ACTION`, so an id change can't cascade either), and may not choose ids (Postgres generates them;
-`created_at` comes from the database's clock too).
+`created_at` comes from the database's clock too). An administrator deletes users and organizations as the owner role
+(the roles table's "delete organization" for OWNER needs that path on day 4).
 
 At startup (`instrumentation.ts`) and in the health check, `assertSafeAppRole()` (`src/server/db/role-check.ts`) asks
 Postgres who the connection is and refuses to serve if any of these would switch layer 3 off or around: the role is a
-superuser, has `BYPASSRLS`, or can `SET ROLE` to a role that is or does; it owns (or can become the owner of) an
+superuser, has `BYPASSRLS`, or is a member of any other role (it is `NOINHERIT`, so a membership's privileges only
+show after `SET ROLE`); the session logged in as a different role (a superuser can `RESET ROLE`); it may execute a
+`SECURITY DEFINER` function; it owns (or can become the owner of) an
 application table; RLS isn't enabled and forced on a protected table; the policies differ in any way from the
 migrations' (name, command, both expressions as Postgres deparses them, permissive, for everyone), so an added
 `USING (true)` policy is caught; the role holds any privilege the least-privilege migration took away; or the

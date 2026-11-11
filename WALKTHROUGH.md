@@ -193,6 +193,15 @@ The ones worth telling:
   500, and the redirect loop for a deleted user (which I had found and fixed an hour earlier).
 It also listed 18 mutants no test caught; each now fails a test.
 
+**And the second round?**
+I asked a second review what the fixes broke, and it found five more: Prisma's own transaction timeout released the
+connection mid-plan just like a rejection (now every statement has a lock and statement timeout far inside the
+transaction timeout); my tracking view broke Prisma's fluent API (`findUnique(...).invoices()`); revoking deletes had
+left `UPDATE (name, slug)` on organizations, so a tenant could take another's slug; the role check missed a superuser
+session that had set its role, `UPDATE` on users, a `SECURITY DEFINER` function, and membership in
+`pg_write_all_data` (invisible because the role is `NOINHERIT`); and RFC 7914's `N < 2^(16 r)` rule. As on earlier
+projects, each round found bugs in the previous round's fixes.
+
 ## What I'd do next, or differently at scale
 
 - Rate-limit sign-in (day 4), and email verification to stop sign-up from revealing accounts.
