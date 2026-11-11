@@ -70,10 +70,12 @@ PgBouncer, though; that would also need checking how Prisma's prepared statement
 
 **Can a tenant learn anything about another tenant's data?**
 Not through the tenant tables: another tenant's rows can't be found, updated, deleted or written
-(`tests/integration/rls.test.ts`). One subtle channel: Postgres checks foreign keys without row security. With a plain
-`customer_id` foreign key, inserting an invoice with another tenant's customer id would fail differently from a
-random id, revealing that the id exists. The composite key `(organization_id, customer_id)` makes both fail the
-same way, and a test compares the two errors.
+(`tests/integration/rls.test.ts`). The subtle channel is key checks: Postgres checks foreign keys and unique keys
+without row security, so any key that spans tenants answers "does this exist over there?". The composite foreign key
+`(organization_id, customer_id)` makes another tenant's customer id fail exactly like a random one (a test compares
+the errors). My first version still leaked through unique keys, which the review found: `(invoice_id, position)` and
+the primary keys. Now unique keys on tenant tables start with `organization_id`, and the app role can't choose ids at
+all (`tests/review/unique-oracle.test.ts`).
 
 **What does isolation cost?**
 Measured with `npm run bench` (README, "Results"): a one-round-trip count with no isolation took 426 µs at the
@@ -86,6 +88,21 @@ several queries, so the overhead is paid once per request, not per query.
 `organization_id` index with the policy's expression as the index condition. I checked the test catches the
 regression it's for: with the policy rewritten to call a `plpgsql` volatile function, Postgres plans a sequential
 scan even with them disabled.
+
+**Why can't the application delete an organization?**
+Because the delete would cascade through that organization's customers and invoices, and cascades run without row
+security. Before review round 1 fixed it, one `tx.organization.delete({ where: { id: otherOrg } })` inside my own
+tenant's transaction emptied another tenant. Now `tally_app` has no `DELETE` on organizations or users, can't change
+any id (and ids are `ON UPDATE NO ACTION`, so a change couldn't cascade either), and memberships, which every layer
+trusts, can only be written for the transaction's own tenant. An administrator deletes organizations as the owner
+role.
+
+**What does the role check actually check?**
+Everything that would turn row-level security off or around for the connection: superuser, `BYPASSRLS`, being able to
+`SET ROLE` to either, owning an application table, RLS not enabled and forced, any policy different from the
+migrations' (so an extra `USING (true)` policy is caught), any privilege the least-privilege migration removed, or a
+tenant already set when the connection opens. Its tests create throwaway roles and grants inside a superuser
+transaction that rolls back, `SET LOCAL ROLE tally_app`, and read the facts.
 
 ## Authentication
 
@@ -142,7 +159,8 @@ connections. Plus schema checks: every table with an `organization_id` (except `
 policy, and the app role can't touch `_prisma_migrations`.
 
 **How do you know the tests test anything?**
-Mutation checks: I broke each mechanism and watched a test fail. A session-level `set_config` fails two tests;
+Mutation checks: I broke each mechanism and watched a test fail (and the review listed the ones that survived, which
+now have tests). A session-level `set_config` fails two tests;
 dropping `set_config` fails the fixtures; skipping the dummy hash fails the timing test; treating a slug collision
 as a taken email fails two tests; a plain `byte % 36` in the slug suffix fails the uniformity test (chi-square 557
 against a limit of 90).
@@ -155,6 +173,25 @@ against a limit of 90).
   a UUID-shaped folder name. Running CI's steps in a fresh clone found it.
 - Playwright starts `webServer` before `globalSetup`, so migrating in global setup was too late for the server's
   startup check; the server command runs the migrations first.
+
+## What the reviews found
+
+**What did the review find that you'd missed?**
+Round 1 (an agent reviewing the day's work for correctness, writing each finding as a failing test) found nine bugs.
+The ones worth telling:
+- **Writes after a rollback, in Prisma itself.** If `fn` threw while a nested write was waiting on a row lock,
+  Prisma 7.10 rolled back and released the connection, and the rest of the nested write then ran in autocommit:
+  the organization rename was rolled back, the membership created in the same call was committed. `withTenant`
+  now waits for every query `fn` started before letting the transaction end
+  (`tests/review/rollback-then-write.test.ts`).
+- **A silent rollback reported as success.** `fn` caught a unique violation and returned; Postgres answered `COMMIT`
+  with `ROLLBACK`, and `withTenant` returned the id of a row that didn't exist. A `SELECT 1` before commit fixes it.
+- **Cross-tenant writes through the tables RLS didn't cover**, and **the unique-key side channel** (above).
+- **A role check that passed while isolation was broken** (an extra permissive policy, a `TRUNCATE` grant, a tenant
+  preset in the connection URL).
+- A startup check that could hang forever, hashes that parsed but couldn't be verified, a NUL byte making sign-up a
+  500, and the redirect loop for a deleted user (which I had found and fixed an hour earlier).
+It also listed 18 mutants no test caught; each now fails a test.
 
 ## What I'd do next, or differently at scale
 
