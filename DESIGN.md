@@ -68,7 +68,7 @@ flowchart LR
 
 Tenant pages live under `/o/[slug]/...`. The page (or Server Action) calls `requireMembership(slug)` from the data
 access layer (`src/server/dal.ts`), which reads the session's user id, loads the membership of that user in the
-organization with that slug, and returns `{ user, organization, role }`. A user who isn't a member gets the same
+organization with that slug, and returns `{ user, organization, role }` (`requireTenant` adds `run`, below). A user who isn't a member gets the same
 404 as a slug that doesn't exist, so the response doesn't reveal which organizations exist. The check runs in each
 page and action, not only in a layout or the proxy: layouts don't re-run on client navigation, and a proxy-only check
 is one bypass away from no check at all.
@@ -84,7 +84,12 @@ argument, `true`, makes the setting **local to the transaction**: when it commit
 so a pooled connection handed to the next request carries no tenant. A session-level `SET` would leak the previous
 request's tenant to whichever request gets that connection next; a test pins this.
 
-The organization id passed in comes from `requireMembership`, never from the request body or the URL directly.
+The organization id passed in comes from `requireMembership`, never from the request body or the URL directly. To
+make that structural rather than a convention, pages and Server Actions call `requireTenant(slug)`
+(`src/server/dal.ts`), which is `requireMembership` plus a `run(fn)` already bound to the membership's organization:
+they never hold an organization id to pass. Two architecture tests over the source (`tests/unit/architecture.test.ts`)
+check that `withTenant` is called only from the data access layer, and that every query on a tenant table runs on a
+transaction client (`tx`), not on a plain client, where row-level security would silently return nothing.
 
 ### Layer 3: Postgres row-level security
 
@@ -157,6 +162,10 @@ user's id (`sub`).
   request (layer 1). A deleted user's session stops working on the next request because the user lookup fails.
 - Next.js Server Actions check the request's `Origin` against the host, and Auth.js protects its own endpoints with a
   CSRF token. Rate limiting sign-in is a D4 item.
+- Every response carries security headers (`next.config.ts`): `frame-ancestors 'none'` and `X-Frame-Options: DENY`
+  against clickjacking, `nosniff`, a referrer policy that keeps invoice URLs on the site, a Permissions-Policy, and
+  HSTS for HTTPS deployments. There is no `script-src` yet: Next.js's inline scripts would need a per-request nonce,
+  which makes every page dynamic.
 
 ### Roles
 
@@ -214,7 +223,7 @@ scripts/db-setup.sh             roles and databases, idempotent
 src/app/                        routes (App Router)
 src/server/db/                  Prisma clients (app and owner), withTenant, the role check
 src/server/auth/                passwords, credential verification, sign-up
-src/server/dal.ts               requireUser, requireMembership
+src/server/dal.ts               requireUser, requireMembership, requireTenant
 src/auth.ts                     the Auth.js configuration
 tests/                          Vitest: unit tests and integration tests against Postgres
 ```
@@ -238,9 +247,13 @@ the same reason. The app listens on port 8117. Tests use a separate database, `t
   isolation proofs run as `tally_app`: no tenant set means no rows and no inserts (both the never-set and the
   set-then-ended cases); a tenant sees only its rows; an insert or update into another tenant is refused; a
   cross-tenant foreign key is refused; the tenant setting doesn't survive its transaction on a pooled connection;
-  the role check refuses a superuser. And the auth flows: sign-up is atomic, duplicate emails are refused, concurrent
+  the role check refuses the owner role (and, in unit tests, a superuser or a BYPASSRLS role). And the auth flows: sign-up is atomic, duplicate emails are refused, concurrent
   sign-ups with the same organization name both get a slug, credentials verify only with the right password.
-- **e2e (Playwright, D4):** a browser signs up, signs out, signs in.
+- **Architecture (Vitest over the source):** tenant tables are only queried on a `withTenant` transaction, and
+  `withTenant` is only called from the data access layer.
+- **e2e (Playwright):** a browser signs up, signs out and signs in; failed sign-ins look the same either way; another
+  organization's page is a 404 like a missing one; the security headers are on every kind of response. D4 extends
+  this to every route.
 - **CI (GitHub Actions):** a Postgres 14 service container; `npm ci`, the setup script, migrations, typecheck, lint,
   tests and `next build` on Node 22 and 24.
 
