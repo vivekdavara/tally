@@ -44,6 +44,19 @@ jobs:
       # Integration tests migrate tally_test themselves (tests/global-setup.ts).
       - run: npm test
       - run: npm run build
+      # The measurement scripts, small, so they keep working (each count they take is checked).
+      - name: benchmark smoke run
+        env:
+          BENCH_ADMIN_URL: postgresql://postgres@localhost:5432/tally_bench
+          BENCH_TENANTS: '10'
+          BENCH_CUSTOMERS: '100'
+          BENCH_ITERATIONS: '100'
+          BENCH_ROUNDS: '5'
+          BENCH_OUT: ${{ runner.temp }}/bench-tenant.json
+        run: |
+          scripts/db-setup.sh tally_bench
+          npm run bench
+          npm run bench:signin
 
   e2e:
     name: e2e (chrome)
