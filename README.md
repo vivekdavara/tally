@@ -98,7 +98,7 @@ and everything else runs.
 
 All measured on an Apple M3 laptop (macOS 26.6.2, Node 23.11, Postgres 14.20), on AC power.
 
-- **Tests:** 209 Vitest tests (`npx vitest run`, about 20 s with files run one at a time): unit, integration tests
+- **Tests:** 209 Vitest tests (`npx vitest run`, 22 s with files run one at a time): unit, integration tests
   against Postgres (mostly as `tally_app`), two architecture rules over the source, and the review rounds' tests
   (`tests/review/`, `tests/review2/`); 11 Playwright tests (`npm run e2e`, 6.5 s). Every CI step passed in a fresh clone
   of the repository.
