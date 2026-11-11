@@ -77,6 +77,10 @@ npm run db:migrate                  # as tally_owner
 npm run dev                         # http://localhost:8117
 ```
 
+For production mode locally, `npm run build && AUTH_TRUST_HOST=true npm start` (Auth.js wants the trusted host stated
+outside development). The server checks at startup that its database role is bound by row-level security and exits
+if it isn't, so a `DATABASE_URL` pointing at `tally_owner` or a superuser won't start.
+
 Checks:
 
 ```bash
