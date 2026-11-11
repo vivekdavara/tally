@@ -29,7 +29,9 @@ three places, each enough to stop that bug on its own:
    exits if they wouldn't.
 
 On top of that, composite foreign keys (`(organization_id, customer_id)` → `customers (organization_id, id)`) make a
-row that references another tenant's row impossible to store.
+row that references another tenant's row impossible to store, and the application role's grants are column by column:
+it can't choose or change ids, change `organization_id`, or delete organizations or users, because cascades and key
+checks run without row security.
 
 ## Architecture
 
@@ -96,34 +98,50 @@ and everything else runs.
 
 All measured on an Apple M3 laptop (macOS 26.6.2, Node 23.11, Postgres 14.20), on AC power.
 
-- **Tests:** 141 Vitest tests (`npx vitest run`, 2.4 s): 57 unit (including two architecture rules over the source)
-  and 84 integration tests against Postgres, mostly as `tally_app`; 11 Playwright tests (`npm run e2e`, 6.0 s). Every
-  CI step passed in a fresh clone of the repository.
+- **Tests:** 188 Vitest tests (`npx vitest run`, 13.6 s with files run one at a time): 74 unit (including two
+  architecture rules over the source), 93 integration tests against Postgres, mostly as `tally_app`, and 21 from the
+  review rounds (`tests/review/`); 11 Playwright tests (`npm run e2e`, 6.1 s). Every CI step passed in a fresh clone
+  of the repository.
 - **The cost of isolation** (`npm run bench`, synthetic: 100 tenants x 1,000 customers; one tenant's customer count,
-  3,000 times per path, interleaved; one connection each; load average 3.9 with a review agent running):
+  3,000 times per path, interleaved; one connection each; load average 3.0 with a review agent running):
 
   | Path | p50 | p95 | p99 |
   |---|---|---|---|
-  | superuser, explicit `WHERE`, no RLS (one round trip) | 426 µs | 1,717 µs | 2,280 µs |
-  | `withTenant` (RLS adds the filter) | 783 µs | 3,161 µs | 3,845 µs |
-  | `withTenant` plus an explicit `WHERE` | 794 µs | 3,128 µs | 3,965 µs |
+  | superuser, explicit `WHERE`, no RLS (one round trip) | 393 µs | 557 µs | 678 µs |
+  | `withTenant` (RLS adds the filter) | 851 µs | 1,546 µs | 1,891 µs |
+  | `withTenant` plus an explicit `WHERE` | 858 µs | 1,464 µs | 1,871 µs |
 
-  The cost is the three extra round trips (`BEGIN`, `set_config`, `COMMIT`), not the policy: Postgres plans the RLS
-  query and the explicit one the same way, a bitmap index scan on `customers_organization_id_id_key`
-  (`tests/integration/rls-plan.test.ts` pins that the policy can use an index).
+  The cost is the four extra round trips (`BEGIN`, `set_config`, the `SELECT 1` that catches an aborted transaction,
+  `COMMIT`), paid once per request rather than per query; not the policy: Postgres plans the RLS query and the explicit
+  one the same way, a bitmap index scan on `customers_organization_id_id_key` (`tests/integration/rls-plan.test.ts`
+  pins that the policy can use an index). Before the review's fixes added the `SELECT 1`, the same run gave 426 /
+  783 / 794 µs at the median (load 3.9).
 - **Password hashing:** one scrypt (N = 2^15, r = 8, p = 1) takes 45.5 ms at the median (20 runs, min 45.4, max
   46.7: a `node -e` timing loop over `crypto.scrypt`).
 - **Sign-in timing doesn't reveal accounts** (`npm run bench:signin`: the whole credential check, 200 attempts of
-  each kind, interleaved, load 2.3):
+  each kind, interleaved, load 2.8):
 
   | Attempt | p10 | p50 | p90 |
   |---|---|---|---|
-  | wrong password for a real account | 49.9 ms | 50.4 ms | 52.5 ms |
-  | email with no account | 49.9 ms | 50.4 ms | 52.1 ms |
-  | right password | 49.9 ms | 50.4 ms | 52.6 ms |
+  | wrong password for a real account | 49.2 ms | 49.6 ms | 52.0 ms |
+  | email with no account | 49.2 ms | 49.6 ms | 52.1 ms |
+  | right password | 49.3 ms | 49.6 ms | 51.8 ms |
 
   With the dummy hash removed (a mutation, 60 rounds), an unknown email answered in 0.8 ms at the median against
   49.7 ms for a wrong password: a timing oracle for which emails are registered.
+
+## Review
+
+Two review rounds by a separate agent, each reviewing a fixed commit in its own worktree and database, writing every
+finding as a failing test (`tests/review/`).
+
+- **Round 1** (at `135c11c`): nine bugs. The serious ones: writes from another tenant's transaction through the
+  tables RLS didn't cover (deleting an organization cascaded through its rows; a membership in another organization
+  was accepted); unique and primary keys that answered "does this exist in another tenant?"; a Prisma 7.10 behaviour
+  where a rejected transaction's in-flight nested write finished in autocommit after the `ROLLBACK`; a swallowed
+  error reported as success; a role check that passed with an extra `USING (true)` policy. Also a startup check
+  that could hang, unverifiable hash parameters, a NUL byte making sign-up a 500, and the deleted-user redirect loop
+  (already fixed). Plus 18 surviving mutants, each now killed by a test. Fixes: `e98f346` and the commits before it.
 
 ## Design decisions
 
@@ -132,6 +150,9 @@ All measured on an Apple M3 laptop (macOS 26.6.2, Node 23.11, Postgres 14.20), o
 - **A transaction per tenant request.** `set_config(..., true)` only lives inside a transaction, which is what makes
   it safe with a connection pool (and with PgBouncer in transaction mode). The price is three round trips per
   request, measured above.
+- **Least privilege, column by column.** Some writes skip row security even for the app role (cascades, unique-key
+  checks), so its grants leave out everything those could abuse; the startup check verifies the grants and policies
+  are exactly the migrations'.
 - **The app role can't be the owner.** Table owners skip RLS unless it's forced, superusers and `BYPASSRLS` roles
   always skip it. So there are two roles, the policies are forced, and the server refuses to start as anything RLS
   doesn't bind.
@@ -150,8 +171,9 @@ All measured on an Apple M3 laptop (macOS 26.6.2, Node 23.11, Postgres 14.20), o
 - Sign-up tells you when an email already has an account (as most sign-up forms do); hiding that needs an email
   verification flow, which needs an email provider.
 - No rate limiting on sign-in yet (day 4).
-- `users`, `organizations` and `memberships` have no row-level security: they're read before a tenant is known, and
-  are reached only through code that filters by the signed-in user.
+- `users` and `organizations` have no row-level security, and memberships none for reading: they're read before a
+  tenant is known. Writes to them are limited by grants instead (no deletes, no id changes; memberships only for the
+  transaction's tenant).
 - Auth.js v5 is still published as a beta (`5.0.0-beta.32`).
 - `npm audit`: no advisories in the production dependencies; 8 moderate ones in the lint toolchain, all the same
   minimatch advisory (GHSA-g3hv-75wg-m249) reached through typescript-eslint, whose `^10.2.2` range can't reach the
