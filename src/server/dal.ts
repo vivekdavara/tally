@@ -2,6 +2,7 @@ import { notFound, redirect } from "next/navigation";
 import { cache } from "react";
 import { auth } from "@/auth";
 import { db } from "./db/client";
+import { withTenant, type TenantTx } from "./db/tenant";
 import { findMembership, type MembershipView } from "./orgs/memberships";
 
 // The data access layer (DESIGN.md, "Layer 1"). Every page and Server Action that touches tenant data
@@ -36,3 +37,20 @@ export const requireMembership = cache(async (slug: string): Promise<MembershipV
   }
   return { ...membership, user };
 });
+
+export interface Tenant extends MembershipView {
+  user: CurrentUser;
+  /** Runs `fn` in a withTenant transaction for this membership's organization, and no other. */
+  run<T>(fn: (tx: TenantTx) => Promise<T>): Promise<T>;
+}
+
+/**
+ * requireMembership plus a `run` bound to that membership's organization: the way pages and Server Actions
+ * reach tenant data. They never hold an organization id to pass to withTenant, so they can't pass the
+ * wrong one (tests/unit/architecture.test.ts checks withTenant is called only here).
+ */
+export async function requireTenant(slug: string): Promise<Tenant> {
+  const membership = await requireMembership(slug);
+  const organizationId = membership.organization.id;
+  return { ...membership, run: (fn) => withTenant(organizationId, fn) };
+}

@@ -33,6 +33,15 @@ describe("tenant tables", () => {
     expect(offenders).toEqual([]);
   });
 
+  it("are reached through withTenant only from the data access layer (src/server/dal.ts)", () => {
+    const callers = sources(join(ROOT, "src"))
+      .filter((file) => /\bwithTenant\s*\(/.test(readFileSync(file, "utf8")))
+      .map((file) => relative(ROOT, file))
+      .filter((file) => file !== "src/server/db/tenant.ts")
+      .sort();
+    expect(callers).toEqual(["src/server/dal.ts"]);
+  });
+
   it("are found by the scan when used the wrong way (the rule can fail)", () => {
     expect(tenantAccesses("const n = await db().customer.count();")).toEqual([{ receiver: "db()", model: "customer" }]);
     expect(tenantAccesses("await client.invoiceLine.findMany({})")).toEqual([{ receiver: "client", model: "invoiceLine" }]);
