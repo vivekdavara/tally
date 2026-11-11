@@ -4,7 +4,8 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vites
 import { signUpInput } from "@/server/auth/schemas";
 import { signUp } from "@/server/auth/signup";
 import { db } from "@/server/db/client";
-import { unique } from "../helpers";
+import { withTenant } from "@/server/db/tenant";
+import { ownerDb, unique } from "../helpers";
 
 const session = vi.hoisted(() => ({ current: null as null | { user?: { id?: string } } }));
 vi.mock("@/auth", () => ({ auth: async () => session.current }));
@@ -43,8 +44,11 @@ beforeEach(() => {
   session.current = null;
 });
 
+// The app role can't delete users; tests delete them as an administrator (the owner role) would.
+const admin = ownerDb({ max: 1 });
+
 afterAll(async () => {
-  await db().$disconnect();
+  await Promise.all([db().$disconnect(), admin.$disconnect()]);
 });
 
 describe("requireUser", () => {
@@ -61,7 +65,7 @@ describe("requireUser", () => {
 
   it("redirects a session whose user has been deleted", async () => {
     const gone = await newAccount();
-    await db().user.delete({ where: { id: gone.userId } });
+    await admin.user.delete({ where: { id: gone.userId } });
     session.current = { user: { id: gone.userId } };
     expect(await digestOf(requireUser())).toMatch(/^NEXT_REDIRECT;replace;\/signin;/);
   });
@@ -87,12 +91,16 @@ describe("requireMembership", () => {
 
   it("stops working as soon as the membership is removed", async () => {
     const member = await newAccount();
-    await db().membership.create({ data: { userId: member.userId, organizationId: owner.organizationId, role: "MEMBER" } });
+    await withTenant(owner.organizationId, (tx) =>
+      tx.membership.create({ data: { userId: member.userId, organizationId: owner.organizationId, role: "MEMBER" } }),
+    );
     session.current = { user: { id: member.userId } };
     expect((await requireMembership(owner.slug)).role).toBe("MEMBER");
-    await db().membership.delete({
-      where: { organizationId_userId: { organizationId: owner.organizationId, userId: member.userId } },
-    });
+    await withTenant(owner.organizationId, (tx) =>
+      tx.membership.delete({
+        where: { organizationId_userId: { organizationId: owner.organizationId, userId: member.userId } },
+      }),
+    );
     expect(await digestOf(requireMembership(owner.slug))).toBe("NEXT_HTTP_ERROR_FALLBACK;404");
   });
 
@@ -124,7 +132,7 @@ describe("getCurrentUser", () => {
     const { getCurrentUser } = await import("@/server/dal");
     expect(await getCurrentUser()).toBeNull();
     const gone = await newAccount();
-    await db().user.delete({ where: { id: gone.userId } });
+    await admin.user.delete({ where: { id: gone.userId } });
     session.current = { user: { id: gone.userId } };
     expect(await getCurrentUser()).toBeNull();
     session.current = { user: { id: owner.userId } };

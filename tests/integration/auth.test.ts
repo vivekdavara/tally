@@ -5,7 +5,8 @@ import { signUpInput } from "@/server/auth/schemas";
 import { signUp } from "@/server/auth/signup";
 import type { Db } from "@/server/db/client";
 import { findMembership, listMemberships } from "@/server/orgs/memberships";
-import { appDb, unique } from "../helpers";
+import { withTenant } from "@/server/db/tenant";
+import { appDb, ownerDb, unique } from "../helpers";
 
 let app: Db;
 
@@ -131,7 +132,9 @@ describe("verifyCredentials", () => {
     const data = input();
     const result = await signUp(data, app);
     if (!result.ok) throw new Error("sign-up failed");
-    await app.user.delete({ where: { id: result.userId } });
+    // The app role can't delete users; an administrator (the owner role) can.
+    const owner = ownerDb({ max: 1 });
+    await owner.user.delete({ where: { id: result.userId } }).finally(() => owner.$disconnect());
     expect(await verifyCredentials({ email: data.email, password: data.password }, app)).toBeNull();
   });
 });
@@ -153,7 +156,12 @@ describe("memberships", () => {
     const result = await signUp(input({ organizationName: `Zeta ${unique()}` }), app);
     if (!result.ok) throw new Error("sign-up failed");
     const second = await app.organization.create({ data: { name: `Alpha ${unique()}`, slug: `alpha-${unique()}` } });
-    await app.membership.create({ data: { userId: result.userId, organizationId: second.id, role: "MEMBER" } });
+    // Memberships are written only for the transaction's tenant.
+    await withTenant(
+      second.id,
+      (tx) => tx.membership.create({ data: { userId: result.userId, organizationId: second.id, role: "MEMBER" } }),
+      app,
+    );
     const list = await listMemberships(app, result.userId);
     expect(list.map((m) => [m.organization.name.split(" ")[0], m.role])).toEqual([
       ["Alpha", "MEMBER"],

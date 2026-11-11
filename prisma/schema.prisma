@@ -29,14 +29,15 @@ enum InvoiceStatus {
   @@map("invoice_status")
 }
 
-// Not tenant-owned: a user can belong to several organizations.
+// Not tenant-owned: a user can belong to several organizations. Ids are immutable everywhere (onUpdate
+// NoAction): an id change would otherwise cascade into other rows without row security.
 model User {
   id           String       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   // Stored trimmed and lower-cased (src/server/auth/schemas.ts); the unique index is on that form.
   email        String       @unique
   name         String
   passwordHash String       @map("password_hash")
-  createdAt    DateTime     @default(now()) @map("created_at") @db.Timestamptz(3)
+  createdAt    DateTime     @default(dbgenerated("clock_timestamp()")) @map("created_at") @db.Timestamptz(3)
   memberships  Membership[]
 
   @@map("users")
@@ -47,7 +48,7 @@ model Organization {
   id           String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   name         String
   slug         String        @unique
-  createdAt    DateTime      @default(now()) @map("created_at") @db.Timestamptz(3)
+  createdAt    DateTime      @default(dbgenerated("clock_timestamp()")) @map("created_at") @db.Timestamptz(3)
   memberships  Membership[]
   customers    Customer[]
   invoices     Invoice[]
@@ -60,9 +61,9 @@ model Membership {
   organizationId String       @map("organization_id") @db.Uuid
   userId         String       @map("user_id") @db.Uuid
   role           Role
-  createdAt      DateTime     @default(now()) @map("created_at") @db.Timestamptz(3)
-  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  user           User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt      DateTime     @default(dbgenerated("clock_timestamp()")) @map("created_at") @db.Timestamptz(3)
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  user           User         @relation(fields: [userId], references: [id], onDelete: Cascade, onUpdate: NoAction)
 
   @@id([organizationId, userId])
   @@index([userId])
@@ -75,8 +76,8 @@ model Customer {
   organizationId String       @map("organization_id") @db.Uuid
   name           String
   email          String
-  createdAt      DateTime     @default(now()) @map("created_at") @db.Timestamptz(3)
-  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  createdAt      DateTime     @default(dbgenerated("clock_timestamp()")) @map("created_at") @db.Timestamptz(3)
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade, onUpdate: NoAction)
   invoices       Invoice[]
 
   // The target of invoices' composite foreign key.
@@ -93,8 +94,8 @@ model Invoice {
   number         Int?
   status         InvoiceStatus @default(DRAFT)
   currency       String        @db.Char(3)
-  createdAt      DateTime      @default(now()) @map("created_at") @db.Timestamptz(3)
-  organization   Organization  @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  createdAt      DateTime      @default(dbgenerated("clock_timestamp()")) @map("created_at") @db.Timestamptz(3)
+  organization   Organization  @relation(fields: [organizationId], references: [id], onDelete: Cascade, onUpdate: NoAction)
   // By (organization_id, customer_id): another organization's customer can't be referenced.
   // NoAction, not Restrict: Postgres checks NO ACTION at the end of the statement, so deleting an
   // organization (which cascades to its customers and its invoices together) succeeds, while
@@ -118,10 +119,13 @@ model InvoiceLine {
   quantity       Decimal      @db.Decimal(12, 3)
   // Integer minor units (cents for USD); never floating point.
   unitPriceMinor BigInt       @map("unit_price_minor")
-  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade, onUpdate: NoAction)
   invoice        Invoice      @relation(fields: [organizationId, invoiceId], references: [organizationId, id], onDelete: Cascade, onUpdate: NoAction)
 
-  @@unique([invoiceId, position])
-  @@index([organizationId, invoiceId])
+  // Unique per organization, not per invoice id alone: unique checks ignore row-level security, so a
+  // (invoice_id, position) key would answer "taken" for another tenant's invoice and "no such invoice" for
+  // a random id. With organization_id first, the key never collides across tenants. It also serves the
+  // (organization_id, invoice_id) lookups the old separate index did.
+  @@unique([organizationId, invoiceId, position])
   @@map("invoice_lines")
 }

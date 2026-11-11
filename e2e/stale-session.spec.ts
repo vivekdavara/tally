@@ -14,8 +14,8 @@ test("a session whose user was deleted lands on the sign-in form, not in a redir
   await page.getByRole("button", { name: "Create organization" }).click();
   await expect(page.getByRole("heading", { level: 1, name: `Stale ${id}` })).toBeVisible();
 
-  // Delete the user behind the browser's back, as an administrator would.
-  execFileSync("psql", ["-X", "-q", "-d", process.env.E2E_DATABASE_URL!, "-c", `DELETE FROM users WHERE email = '${email}'`]);
+  // Delete the user behind the browser's back, as an administrator would (the app role can't delete users).
+  execFileSync("psql", ["-X", "-q", "-d", process.env.E2E_MIGRATE_DATABASE_URL!, "-c", `DELETE FROM users WHERE email = '${email}'`]);
 
   for (const path of ["/o", "/signin", "/signup"]) {
     const response = await page.goto(path);

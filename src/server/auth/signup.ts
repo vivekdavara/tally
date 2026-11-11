@@ -33,6 +33,9 @@ export async function signUp(input: SignUpInput, client: Db = db()): Promise<Sig
           data: { name: input.organizationName, slug },
           select: { id: true },
         });
+        // Memberships can only be written for the transaction's tenant (row-level security), so the new
+        // organization becomes the tenant before its first member is added.
+        await tx.$executeRaw`SELECT set_config('app.organization_id', ${organization.id}, true)`;
         await tx.membership.create({ data: { userId: user.id, organizationId: organization.id, role: "OWNER" } });
         return { ok: true as const, userId: user.id, organizationId: organization.id, slug };
       });

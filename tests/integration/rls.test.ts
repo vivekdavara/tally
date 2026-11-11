@@ -154,14 +154,22 @@ describe("inside withTenant", () => {
     ).rejects.toThrow(/row-level security/);
   });
 
-  it("refuses to move its own row to another tenant", async () => {
-    await expect(
+  it("refuses to move its own row to another tenant: no grant for the app, and the policy for the owner", async () => {
+    const move = (client: Db) =>
       withTenant(
         a.orgId,
         (tx) => tx.$executeRaw`UPDATE customers SET organization_id = ${b.orgId}::uuid WHERE id = ${a.customerIds[1]}::uuid`,
-        app,
-      ),
-    ).rejects.toThrow(/row-level security/);
+        client,
+      );
+    // tally_app may not update organization_id at all (column grants)...
+    await expect(move(app)).rejects.toThrow(/permission denied/);
+    // ...and even the owner, who may, is stopped by the forced policy's WITH CHECK.
+    const owner = ownerDb({ max: 1 });
+    try {
+      await expect(move(owner)).rejects.toThrow(/row-level security/);
+    } finally {
+      await owner.$disconnect();
+    }
   });
 
   it("can't reference another tenant's customer, and the error is the same as for an id that doesn't exist", async () => {
@@ -247,9 +255,12 @@ describe("the schema", () => {
     await expect(app.$queryRaw`SELECT count(*) FROM _prisma_migrations`).rejects.toThrow(/permission denied/);
   });
 
-  it("cascades an organization's deletion through its customers, invoices and lines", async () => {
+  it("lets only an administrator delete an organization, which cascades through its customers, invoices and lines", async () => {
     const t = await makeTenant(app, "gamma");
-    await app.organization.delete({ where: { id: t.orgId } });
+    // The cascade runs without row security, so the app role may not start one.
+    await expect(app.organization.delete({ where: { id: t.orgId } })).rejects.toThrow(/permission denied/);
+    const owner = ownerDb({ max: 1 });
+    await owner.organization.delete({ where: { id: t.orgId } }).finally(() => owner.$disconnect());
     const left = await withTenant(
       t.orgId,
       async (tx) => (await tx.customer.count()) + (await tx.invoice.count()) + (await tx.invoiceLine.count()),

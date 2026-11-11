@@ -1,4 +1,4 @@
-// REVIEW FINDING: when fn rejects while one of its Prisma operations is still running, withTenant's
+// REVIEW FINDING (round 1; adapted after the least-privilege migration, see the end of the test): when fn rejects while one of its Prisma operations is still running, withTenant's
 // transaction is rolled back but the rest of that operation still runs afterwards, on the same pooled
 // connection, outside any transaction, and commits.
 //
@@ -39,7 +39,7 @@ describe("withTenant when fn rejects during a nested write", () => {
   it("commits none of fn's writes", async () => {
     const s = unique();
     const org = await locker.organization.create({ data: { name: `stale ${s}`, slug: `stale-${s}` } });
-    const user = await locker.user.create({ data: { email: `stale-${s}@example.com`, name: "U", passwordHash: "x" } });
+    const orphanEmail = `orphan-${s}@example.com`;
 
     // Another transaction holds the organization row, so the nested write's first query (the UPDATE) is
     // still running when fn rejects: ordinary lock contention, nothing artificial.
@@ -57,7 +57,13 @@ describe("withTenant when fn rejects during a nested write", () => {
         Promise.all([
           tx.organization.update({
             where: { id: org.id },
-            data: { name: "renamed", memberships: { create: { userId: user.id, role: "ADMIN" } } },
+            // The nested write's later queries insert a user (allowed with no tenant set) and a membership.
+            data: {
+              name: "renamed",
+              memberships: {
+                create: { role: "ADMIN", user: { create: { email: orphanEmail, name: "Orphan", passwordHash: "x" } } },
+              },
+            },
           }),
           sleep(100).then(() => {
             throw new Error("validation failed");
@@ -76,7 +82,10 @@ describe("withTenant when fn rejects during a nested write", () => {
 
     const after = await locker.organization.findUniqueOrThrow({ where: { id: org.id }, include: { memberships: true } });
     expect(after.name).toBe(`stale ${s}`); // the UPDATE was rolled back...
-    // ...and so should the membership be. Observed: [{ role: "ADMIN", ... }], committed after the ROLLBACK.
+    // ...and so should the rest of the nested write be. Before the fix the membership was committed after the
+    // ROLLBACK; since memberships are under row-level security that insert fails, but the user insert before
+    // it doesn't need a tenant, and was committed (checked with the fix removed).
     expect(after.memberships).toEqual([]);
+    expect(await locker.user.count({ where: { email: orphanEmail } })).toBe(0);
   });
 });
