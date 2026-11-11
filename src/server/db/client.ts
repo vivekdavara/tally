@@ -3,10 +3,18 @@ import { PrismaClient } from "@/generated/prisma/client";
 
 export type Db = PrismaClient;
 
-/** A Prisma client over its own `pg` pool. `max` bounds the pool's connections. */
-export function createDb(connectionString: string, options: { max?: number } = {}): Db {
+/**
+ * A Prisma client over its own `pg` pool. `max` bounds the pool's connections. Connecting gives up after
+ * five seconds (pg's default is to wait forever): a database that accepts the TCP connection but never
+ * answers would otherwise hang the startup check, and every request, indefinitely.
+ */
+export function createDb(connectionString: string, options: { max?: number; connectTimeoutMs?: number } = {}): Db {
   return new PrismaClient({
-    adapter: new PrismaPg({ connectionString, max: options.max ?? 10 }),
+    adapter: new PrismaPg({
+      connectionString,
+      max: options.max ?? 10,
+      connectionTimeoutMillis: options.connectTimeoutMs ?? 5_000,
+    }),
   });
 }
 

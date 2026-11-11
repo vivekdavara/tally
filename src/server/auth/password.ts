@@ -3,8 +3,11 @@ import { randomBytes, scrypt as scryptCallback, timingSafeEqual, type ScryptOpti
 // DESIGN.md, "Authentication": scrypt from Node's crypto, parameters stored with each hash.
 export const SCRYPT = { N: 2 ** 15, r: 8, p: 1, keyLength: 32, saltLength: 16 } as const;
 
-// scrypt needs about 128 * N * r bytes (32 MiB here), which is Node's default limit; leave headroom.
-const MAX_MEMORY = 128 * 1024 * 1024;
+// scrypt needs about 128 * N * r bytes (32 MiB for SCRYPT), plus working space; Node refuses to start one
+// whose estimate reaches `maxmem`. Stored hashes may use up to MAX_HASH_MEMORY, and maxmem is twice that, so
+// every hash parseHash accepts can actually be verified (review round 1: N = 2^17, r = 8 threw).
+export const MAX_HASH_MEMORY = 128 * 1024 * 1024;
+const MAX_MEMORY = 2 * MAX_HASH_MEMORY;
 
 // Bounds on parameters read back from a stored hash, so a corrupted or hostile value can't make one
 // verification take minutes or gigabytes.
@@ -49,6 +52,7 @@ export function parseHash(stored: string): Parsed | null {
   const logN = Math.log2(parsed.N);
   if (!Number.isInteger(logN) || logN < LIMITS.minLogN || logN > LIMITS.maxLogN) return null;
   if (parsed.r > LIMITS.maxR || parsed.p > LIMITS.maxP) return null;
+  if (128 * parsed.N * parsed.r > MAX_HASH_MEMORY) return null;
   if (parsed.key.length < LIMITS.minKey || parsed.key.length > LIMITS.maxKey) return null;
   if (parsed.salt.length < LIMITS.minSalt || parsed.salt.length > LIMITS.maxSalt) return null;
   return parsed;
@@ -59,8 +63,13 @@ export async function verifyPassword(password: string, stored: string): Promise<
   const parsed = parseHash(stored);
   if (!parsed) return false;
   const { N, r, p, salt, key } = parsed;
-  const candidate = await scrypt(normalize(password), salt, key.length, { N, r, p, maxmem: MAX_MEMORY });
-  return timingSafeEqual(candidate, key);
+  try {
+    const candidate = await scrypt(normalize(password), salt, key.length, { N, r, p, maxmem: MAX_MEMORY });
+    return timingSafeEqual(candidate, key);
+  } catch {
+    // Parameters Node won't run (parseHash should already have refused them): no match, not a 500.
+    return false;
+  }
 }
 
 let dummy: Promise<string> | undefined;

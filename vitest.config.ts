@@ -21,6 +21,10 @@ export default defineConfig({
       TEST_MIGRATE_DATABASE_URL: ownerUrl,
       TEST_ADMIN_DATABASE_URL: adminUrl,
     },
+    // One file at a time: the role-check tests run DDL (policies, grants, roles) in transactions that
+    // roll back, which takes exclusive locks on tables other files write to (a deadlock, 40P01, when they
+    // overlapped), and one review test commits a grant for a moment. Serial costs a few seconds.
+    fileParallelism: false,
     testTimeout: 30_000,
     hookTimeout: 60_000,
   },

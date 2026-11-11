@@ -14,8 +14,17 @@ export const newPassword = z
   .min(10, "Use at least 10 characters.")
   .max(128, "Use at most 128 characters.");
 
+// No control characters: Postgres text can't hold NUL (a NUL made sign-up a 500), and the others have no
+// place in a name shown on invoices.
+const CONTROL = /\p{Cc}/u;
+
 const name = (what: string) =>
-  z.string().trim().min(1, `Enter ${what}.`).max(100, `Use at most 100 characters for ${what}.`);
+  z
+    .string()
+    .trim()
+    .min(1, `Enter ${what}.`)
+    .max(100, `Use at most 100 characters for ${what}.`)
+    .refine((value) => !CONTROL.test(value), `Remove control characters from ${what}.`);
 
 export const signUpInput = z.object({
   name: name("your name"),
