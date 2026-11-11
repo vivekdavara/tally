@@ -96,8 +96,9 @@ and everything else runs.
 
 All measured on an Apple M3 laptop (macOS 26.6.2, Node 23.11, Postgres 14.20), on AC power.
 
-- **Tests:** 115 Vitest tests (`npx vitest run`, 2.2 s): 54 unit, 61 integration against Postgres (mostly as `tally_app`);
-  5 Playwright tests (`npm run e2e`, 5.3 s). Every CI step passed in a fresh clone of the repository.
+- **Tests:** 141 Vitest tests (`npx vitest run`, 2.4 s): 57 unit (including two architecture rules over the source)
+  and 84 integration tests against Postgres, mostly as `tally_app`; 11 Playwright tests (`npm run e2e`, 6.0 s). Every
+  CI step passed in a fresh clone of the repository.
 - **The cost of isolation** (`npm run bench`, synthetic: 100 tenants x 1,000 customers; one tenant's customer count,
   3,000 times per path, interleaved; one connection each; load average 3.9 with a review agent running):
 
@@ -152,5 +153,8 @@ All measured on an Apple M3 laptop (macOS 26.6.2, Node 23.11, Postgres 14.20), o
 - `users`, `organizations` and `memberships` have no row-level security: they're read before a tenant is known, and
   are reached only through code that filters by the signed-in user.
 - Auth.js v5 is still published as a beta (`5.0.0-beta.32`).
+- `npm audit`: no advisories in the production dependencies; 8 moderate ones in the lint toolchain, all the same
+  minimatch advisory (GHSA-g3hv-75wg-m249) reached through typescript-eslint, whose `^10.2.2` range can't reach the
+  fixed 11.0.1. It only ever sees the repository's own lint globs.
 
 MIT licensed.
