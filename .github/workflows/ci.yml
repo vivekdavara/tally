@@ -41,8 +41,11 @@ jobs:
       - run: scripts/db-setup.sh
       - run: npm run typecheck
       - run: npm run lint
-      # Integration tests migrate tally_test themselves (tests/global-setup.ts).
+      # Integration tests migrate tally_test themselves (tests/global-setup.ts). The role-check tests need a
+      # superuser connection.
       - run: npm test
+        env:
+          TEST_ADMIN_DATABASE_URL: postgresql://postgres@localhost:5432/tally_test
       - run: npm run build
       # The measurement scripts, small, so they keep working (each count they take is checked).
       - name: benchmark smoke run

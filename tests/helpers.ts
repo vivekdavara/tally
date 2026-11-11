@@ -19,6 +19,11 @@ export function ownerDb(options: { max?: number } = {}): Db {
   return createDb(ownerUrl(), options);
 }
 
+/** A superuser connection (local: this machine's user; CI: postgres), for tests that need one. */
+export function adminDb(options: { max?: number } = {}): Db {
+  return createDb(process.env.TEST_ADMIN_DATABASE_URL!, options);
+}
+
 /** A fresh suffix, so tests in parallel files never collide on unique columns. */
 export function unique(): string {
   return randomBytes(6).toString("hex");
