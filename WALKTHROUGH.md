@@ -41,6 +41,13 @@ not a crashed one. `process.exit(1)` makes the misconfiguration a crash, which i
 Node-only module because Next.js also compiles `instrumentation.ts` for the Edge runtime, which has no
 `process.exit`.
 
+**How do you stop a page from passing the wrong organization id to `withTenant`?**
+Pages don't get one. `requireTenant(slug)` (`src/server/dal.ts`) does the membership check and returns a `run(fn)`
+already bound to that organization, so the only id a page can use is the one the check found. Two tests over the
+source keep it that way (`tests/unit/architecture.test.ts`): `withTenant` may only be called from the data access
+layer, and every query on a tenant table must run on a transaction client named `tx`. The old version of the
+organization page, which called `withTenant` itself, fails the first.
+
 ## The tenant setting
 
 **Why `set_config(..., true)` instead of `SET app.organization_id = ...`?**
@@ -113,6 +120,13 @@ indexes decide races. Same email: exactly one succeeds and the rest get `email_t
 retried with a random 6-character suffix, so all succeed (8 concurrent sign-ups, 8 distinct slugs). Prisma 7's pg
 adapter reports the violated constraint's name under `meta.driverAdapterError`, which is how the two cases are told
 apart.
+
+**What protects the pages in the browser?**
+Security headers on every response (`next.config.ts`, checked by `e2e/headers.spec.ts`): no framing
+(`frame-ancestors 'none'`, `X-Frame-Options: DENY`) so the sign-in form can't be clickjacked, `nosniff`, a referrer
+policy so invoice URLs don't leak to other sites, a Permissions-Policy, and HSTS for HTTPS. There's no
+`script-src` restriction yet, because Next.js's inline scripts would need a per-request nonce, which makes every
+page dynamic; that's a trade-off I'd revisit before production.
 
 **Why 404 and not 403 for an organization you don't belong to?**
 A 403 would confirm the organization exists. `findMembership` returns one `null` for both cases, and the e2e test
