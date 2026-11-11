@@ -171,9 +171,11 @@ describe("inside withTenant", () => {
     const missing = await attempt(crypto.randomUUID()).catch((e: unknown) => e);
     expect(foreign).toMatchObject({ code: "P2003" });
     expect(missing).toMatchObject({ code: "P2003" });
-    expect(String((foreign as Error).message).replaceAll(b.customerIds[0]!, "<id>")).toBe(
-      String((missing as Error).message).replace(/[0-9a-f-]{36}/g, "<id>"),
-    );
+    // The same constraint, and the same message once ids (and anything id-shaped, such as a checkout path
+    // with a UUID in it) are blanked the same way in both.
+    expect((foreign as { meta: unknown }).meta).toEqual((missing as { meta: unknown }).meta);
+    const blank = (e: unknown) => String((e as Error).message).replace(/[0-9a-f]{8}-[0-9a-f-]{27}/g, "<id>");
+    expect(blank(foreign)).toBe(blank(missing));
   });
 
   it("gives queries made on another client inside the callback no tenant", async () => {
