@@ -2,7 +2,7 @@
 # Creates Tally's two roles and its databases. Idempotent: running it again changes nothing, except that it
 # re-asserts tally_app's restrictions in case someone loosened them.
 #
-#   scripts/db-setup.sh [database ...]      default: tally tally_test
+#   scripts/db-setup.sh [database ...]      default: tally tally_test tally_e2e
 #
 # Connects with psql's usual defaults (PGHOST, PGPORT, PGUSER; locally the Homebrew superuser over the Unix
 # socket, in CI the service container's postgres user), which must be a superuser or have CREATEROLE and
@@ -11,7 +11,7 @@
 set -euo pipefail
 
 if [ "$#" -eq 0 ]; then
-  set -- tally tally_test
+  set -- tally tally_test tally_e2e
 fi
 
 psql_admin() {
