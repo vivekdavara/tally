@@ -84,6 +84,17 @@ argument, `true`, makes the setting **local to the transaction**: when it commit
 so a pooled connection handed to the next request carries no tenant. A session-level `SET` would leak the previous
 request's tenant to whichever request gets that connection next; a test pins this.
 
+Two guards around `fn` keep the transaction's outcome and its writes in agreement (both found by review round 1):
+
+- **No writes after the rollback.** If `fn` rejects while one of its queries is still running (a `Promise.all`
+  sibling threw), Prisma 7.10 sends `ROLLBACK` and releases the connection, and the rest of a multi-query operation
+  (a nested write) then runs outside any transaction and commits. `fn` therefore gets a view of the transaction
+  that records each Prisma promise once it starts, and `withTenant` waits for all of them before rolling back or
+  committing.
+- **No success for an aborted transaction.** If `fn` catches a database error and returns, Postgres has already
+  aborted the transaction and answers `COMMIT` with a silent `ROLLBACK`. One `SELECT 1` after `fn` turns that into
+  an error instead of a success for writes that were never stored.
+
 The organization id passed in comes from `requireMembership`, never from the request body or the URL directly. To
 make that structural rather than a convention, pages and Server Actions call `requireTenant(slug)`
 (`src/server/dal.ts`), which is `requireMembership` plus a `run(fn)` already bound to the membership's organization:
@@ -118,11 +129,23 @@ owner skips them unless the table is `FORCE`d.** So there are two roles:
 | Role | Used by | Can |
 |---|---|---|
 | `tally_owner` | migrations (`prisma migrate deploy`) | owns the schema's tables; DDL |
-| `tally_app` | the running application, tests of isolation | `SELECT`, `INSERT`, `UPDATE`, `DELETE` on the application's tables, granted table by table in the migrations; `USAGE` on sequences it needs; nothing else. `NOSUPERUSER NOBYPASSRLS`, owns nothing |
+| `tally_app` | the running application, tests of isolation | `SELECT` on the application's tables, and `INSERT`/`UPDATE`/`DELETE` granted **column by column** (`*_least_privilege`): never on `id` or `organization_id`, no `DELETE` on `users` or `organizations`, no `TRUNCATE`, `REFERENCES` or `TRIGGER`. `NOSUPERUSER NOBYPASSRLS`, owns nothing |
 
-At startup (`instrumentation.ts`) and in the health check, `assertSafeAppRole()` asks Postgres who it is connected as
-and refuses to serve if that role is a superuser, has `BYPASSRLS`, or owns a tenant table, because any of those would
-silently switch layer 3 off. `scripts/db-setup.sh` creates the roles and databases; it is idempotent.
+The narrow grants matter because some writes run without row security even for `tally_app`: foreign-key actions
+(`ON DELETE CASCADE` from an organization through its customers and invoices) and unique-key checks. So the app may
+not delete organizations or users (an administrator does, as the owner), may not change any id (every key is
+`ON UPDATE NO ACTION`, so an id change can't cascade either), and may not choose ids (Postgres generates them;
+`created_at` comes from the database's clock too).
+
+At startup (`instrumentation.ts`) and in the health check, `assertSafeAppRole()` (`src/server/db/role-check.ts`) asks
+Postgres who the connection is and refuses to serve if any of these would switch layer 3 off or around: the role is a
+superuser, has `BYPASSRLS`, or can `SET ROLE` to a role that is or does; it owns (or can become the owner of) an
+application table; RLS isn't enabled and forced on a protected table; the policies differ in any way from the
+migrations' (name, command, both expressions as Postgres deparses them, permissive, for everyone), so an added
+`USING (true)` policy is caught; the role holds any privilege the least-privilege migration took away; or the
+connection starts with `app.organization_id` already set (a URL `options=-c ...` or a role default). The startup
+check gives up and exits after 15 s, and connections give up after 5 s, so a database that never answers can't leave a
+server that neither serves nor exits. `scripts/db-setup.sh` creates the roles and databases; it is idempotent.
 
 ### Composite foreign keys: a cross-tenant reference can't be stored
 
@@ -131,15 +154,29 @@ silently switch layer 3 off. `scripts/db-setup.sh` creates the roles and databas
 An invoice of organization A pointing at a customer of organization B is therefore not a row the schema can hold,
 whoever writes it, including a migration or a superuser.
 
-This also closes the one channel RLS leaves open: Postgres checks foreign keys without applying row security, so with
-a plain `customer_id` foreign key, an insert's success or failure would tell a tenant whether *another* tenant's
-customer id exists. With the composite key, another tenant's customer id fails exactly like a random one.
+This also closes a channel RLS leaves open: Postgres checks foreign keys **and unique keys** without applying row
+security, so a key that spans tenants answers "does this exist in another tenant?". With a plain `customer_id`
+foreign key, another tenant's customer id would fail differently from a random one; with the composite key it fails
+the same way. Review round 1 found the unique-key version: a line at a position another tenant's invoice used failed
+on `(invoice_id, position)` where a random invoice id failed the foreign key, and an insert with another tenant's
+customer id failed on the primary key where a random id succeeded. So unique keys on tenant tables start with
+`organization_id`, and the app can't supply ids at all.
+
+### Memberships
+
+Memberships decide who may act for an organization, so every layer trusts them. They are under forced RLS too, with
+four policies: readable without a tenant (signing in and resolving a slug happen before one is known), but inserted,
+updated and deleted only for the transaction's tenant. Sign-up sets its new organization as the tenant before adding
+the first member; invitations (day 4) run inside `requireTenant`. Before this (review round 1), one call inside
+tenant A's `withTenant` could make a user an OWNER of tenant B.
 
 ### What RLS doesn't cover, and why
 
-`users`, `organizations` and `memberships` have no policies: they are read before a tenant is known (signing in,
-resolving a slug). They are reached only through `src/server/auth/` and `src/server/dal.ts`, which always filter by
-the session's user id. D4's isolation suite checks every route against a second organization's ids.
+`users` and `organizations` have no policies, and memberships have none for reading: they are read before a tenant is
+known (signing in, resolving a slug). What limits writes to them is the grants: the app can create users and
+organizations and rename organizations, but can't delete either or change an id. They are reached only through
+`src/server/auth/` and `src/server/dal.ts`, which always filter by the session's user id. D4's isolation suite checks
+every route against a second organization's ids.
 
 ## Authentication
 
@@ -152,9 +189,12 @@ user's id (`sub`).
   key), stored as `scrypt$<N>$<r>$<p>$<salt>$<key>` (base64url), so parameters can be raised later and old hashes
   still verify. Comparison is constant-time (`timingSafeEqual`). No native dependency (bcrypt, argon2) to build in
   CI. Passwords are 10 to 128 characters; the upper bound caps the hashing work an anonymous request can cause.
+  Parameters read back from a stored hash are bounded (N 2^14 to 2^20, r up to 32, p up to 16, and 128 * N * r at
+  most 128 MiB), so every hash that parses can be verified and none can make one sign-in take gigabytes.
 - **Unknown email:** sign-in still runs one scrypt against a fixed dummy hash, so the response time doesn't tell an
   attacker which emails have accounts. The error message is the same in both cases.
 - **Emails** are trimmed and lower-cased before they're stored or looked up; the unique index is on that form.
+  **Names** may not contain control characters (Postgres text can't hold NUL, which made sign-up a 500).
 - **Sign-up** creates the user, the organization and an `OWNER` membership in one transaction. If the email is taken,
   nothing is created. The organization's slug comes from its name (`Acme, Inc.` → `acme-inc`); if that slug is taken,
   a short random suffix is added and the insert retried, so two concurrent sign-ups with the same name both succeed.
@@ -254,6 +294,10 @@ the same reason. The app listens on port 8117. Tests use a separate database, `t
 - **e2e (Playwright):** a browser signs up, signs out and signs in; failed sign-ins look the same either way; another
   organization's page is a 404 like a missing one; the security headers are on every kind of response. D4 extends
   this to every route.
+- **Review tests (`tests/review/`):** each finding of the review rounds, as the reviewer wrote it (adapted where a
+  later fix changed the setup), so the bug can't come back unnoticed.
+- Test files run one at a time: the role-check tests run DDL in transactions that roll back, which takes exclusive
+  locks other files' writes would wait on (a deadlock once, when they ran in parallel).
 - **CI (GitHub Actions):** a Postgres 14 service container; `npm ci`, the setup script, migrations, typecheck, lint,
   tests and `next build` on Node 22 and 24.
 
