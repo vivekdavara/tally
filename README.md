@@ -53,6 +53,7 @@ prisma/schema.prisma             the data model
 prisma/migrations/               SQL: tables and CHECKs; row-level security and grants
 scripts/db-setup.sh              roles (tally_owner, tally_app) and databases, idempotent
 scripts/bench-tenant.ts          what isolation costs per query
+scripts/bench-signin.ts          whether sign-in timing reveals which emails exist
 src/server/db/tenant.ts          withTenant
 src/server/db/role-check.ts      assertSafeAppRole: is RLS binding this connection?
 src/server/auth/                 passwords (scrypt), Zod schemas, credentials, sign-up
@@ -81,7 +82,7 @@ Checks:
 ```bash
 npm run check                       # typecheck, lint, unit + integration tests (needs Postgres)
 npm run build && npm run e2e        # Playwright against next start on :8117, database tally_e2e
-scripts/db-setup.sh tally_bench && npm run bench
+scripts/db-setup.sh tally_bench && npm run bench && npm run bench:signin
 ```
 
 On Node 23 (this Mac's), Prisma's preinstall refuses to run; `npm ci --ignore-scripts && npx prisma generate` works,
@@ -107,6 +108,17 @@ All measured on an Apple M3 laptop (macOS 26.6.2, Node 23.11, Postgres 14.20), o
   (`tests/integration/rls-plan.test.ts` pins that the policy can use an index).
 - **Password hashing:** one scrypt (N = 2^15, r = 8, p = 1) takes 45.5 ms at the median (20 runs, min 45.4, max
   46.7: a `node -e` timing loop over `crypto.scrypt`).
+- **Sign-in timing doesn't reveal accounts** (`npm run bench:signin`: the whole credential check, 200 attempts of
+  each kind, interleaved, load 2.3):
+
+  | Attempt | p10 | p50 | p90 |
+  |---|---|---|---|
+  | wrong password for a real account | 49.9 ms | 50.4 ms | 52.5 ms |
+  | email with no account | 49.9 ms | 50.4 ms | 52.1 ms |
+  | right password | 49.9 ms | 50.4 ms | 52.6 ms |
+
+  With the dummy hash removed (a mutation, 60 rounds), an unknown email answered in 0.8 ms at the median against
+  49.7 ms for a wrong password: a timing oracle for which emails are registered.
 
 ## Design decisions
 
