@@ -42,6 +42,14 @@ describe("signUpInput", () => {
     }
   });
 
+  it("counts the minimum length in normalized characters, the form that gets hashed", () => {
+    expect(signUpInput.safeParse({ ...good, password: "e\u0301".repeat(5) }).success).toBe(false);
+    expect(signUpInput.safeParse({ ...good, password: "e\u0301".repeat(10) }).success).toBe(true);
+    expect(signUpInput.safeParse({ ...good, password: "\u00e9".repeat(10) }).success).toBe(true);
+    // Astral characters count once each, not as two UTF-16 units.
+    expect(signUpInput.safeParse({ ...good, password: "🔑".repeat(5) }).success).toBe(false);
+  });
+
   it("accepts the boundary lengths", () => {
     expect(signUpInput.safeParse({ ...good, password: "x".repeat(10) }).success).toBe(true);
     expect(signUpInput.safeParse({ ...good, password: "x".repeat(128) }).success).toBe(true);

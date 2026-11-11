@@ -7,12 +7,14 @@ export const email = z.string().trim().toLowerCase().pipe(z.email("Enter a valid
 
 /**
  * 10 to 128 characters. The upper bound caps the hashing work one anonymous request can cause; the lower one
- * follows NIST 800-63B's advice to prefer length over composition rules.
+ * follows NIST 800-63B's advice to prefer length over composition rules. The minimum counts characters of
+ * the NFKC form, which is what gets hashed (password.ts): five decomposed "é"s are ten UTF-16 units but five
+ * characters once normalized.
  */
 export const newPassword = z
   .string()
-  .min(10, "Use at least 10 characters.")
-  .max(128, "Use at most 128 characters.");
+  .max(128, "Use at most 128 characters.")
+  .refine((value) => [...value.normalize("NFKC")].length >= 10, "Use at least 10 characters.");
 
 // No control characters: Postgres text can't hold NUL (a NUL made sign-up a 500), and the others have no
 // place in a name shown on invoices.
