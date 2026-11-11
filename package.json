@@ -17,6 +17,7 @@
     "lint": "eslint --max-warnings 0 .",
     "test": "vitest run",
     "e2e": "playwright test",
+    "bench": "tsx scripts/bench-tenant.ts",
     "db:setup": "scripts/db-setup.sh",
     "db:migrate": "prisma migrate deploy",
     "check": "npm run typecheck && npm run lint && npm test"
@@ -41,6 +42,7 @@
     "eslint": "9.39.5",
     "eslint-config-next": "16.4.5",
     "prisma": "7.10.1",
+    "tsx": "4.23.15",
     "typescript": "5.9.3",
     "typescript-eslint": "8.72.1",
     "vitest": "5.1.0"

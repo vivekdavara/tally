@@ -13,3 +13,4 @@ next-env.d.ts
 .DS_Store
 test-results/
 playwright-report/
+bench-tenant.json
