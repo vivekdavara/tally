@@ -1,6 +1,9 @@
-// Liveness only for now; the database check arrives with the Prisma client.
+import { db } from "@/server/db/client";
+import { checkHealth } from "@/server/health";
+
 export const dynamic = "force-dynamic";
 
-export function GET() {
-  return Response.json({ status: "ok" });
+export async function GET() {
+  const { httpStatus, body } = await checkHealth(db());
+  return Response.json(body, { status: httpStatus, headers: { "Cache-Control": "no-store" } });
 }
