@@ -111,11 +111,12 @@ export async function withTenant<T>(
     throw new TypeError("withTenant: organizationId must be a UUID");
   }
   return client.$transaction(async (tx) => {
-    await tx.$executeRaw`SELECT set_config('app.organization_id', ${organizationId}, true)`;
-    // Bound every statement well inside Prisma's transaction timeout. When Prisma's own timeout fires, it
-    // rolls back and releases the connection mid-operation, and the rest of a nested write runs outside
-    // any transaction (review round 2): a statement stuck on a lock now fails on its own first.
-    await tx.$executeRaw`SELECT set_config('lock_timeout', ${`${LOCK_TIMEOUT_MS}ms`}, true),
+    // The tenant, and (one round trip for all three) every statement bounded well inside Prisma's
+    // transaction timeout: when Prisma's own timeout fires, it rolls back and releases the connection
+    // mid-operation, and the rest of a nested write runs outside any transaction (review round 2). A
+    // statement stuck on a lock now fails on its own first.
+    await tx.$executeRaw`SELECT set_config('app.organization_id', ${organizationId}, true),
+                                set_config('lock_timeout', ${`${LOCK_TIMEOUT_MS}ms`}, true),
                                 set_config('statement_timeout', ${`${STATEMENT_TIMEOUT_MS}ms`}, true)`;
     const inflight = new Set<Promise<unknown>>();
     let result: T;
