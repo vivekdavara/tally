@@ -53,6 +53,8 @@ export function parseHash(stored: string): Parsed | null {
   if (!Number.isInteger(logN) || logN < LIMITS.minLogN || logN > LIMITS.maxLogN) return null;
   if (parsed.r > LIMITS.maxR || parsed.p > LIMITS.maxP) return null;
   if (128 * parsed.N * parsed.r > MAX_HASH_MEMORY) return null;
+  // RFC 7914 requires N < 2^(16 r); Node refuses anything else (review round 2: r = 1 with N >= 2^16 parsed).
+  if (parsed.N >= 2 ** (16 * parsed.r)) return null;
   if (parsed.key.length < LIMITS.minKey || parsed.key.length > LIMITS.maxKey) return null;
   if (parsed.salt.length < LIMITS.minSalt || parsed.salt.length > LIMITS.maxSalt) return null;
   return parsed;

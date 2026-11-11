@@ -41,7 +41,9 @@ describe("the role check against Postgres", () => {
       role: "tally_app",
       superuser: false,
       bypassRls: false,
-      privilegedRoles: [],
+      sessionUser: null,
+      memberOfRoles: [],
+      definerFunctions: [],
       ownedTables: [],
       unprotectedTables: [],
       policyProblems: [],
@@ -53,7 +55,7 @@ describe("the role check against Postgres", () => {
 
   it("refuses the owner role, which could switch row-level security off", async () => {
     await expect(assertSafeAppRole(owner)).rejects.toThrow(
-      /refusing to serve: tally_owner owns or can become the owner of customers, invoice_lines, invoices, memberships, organizations, users/,
+      /refusing to serve: .*tally_owner owns or can become the owner of customers, invoice_lines, invoices, memberships, organizations, users/,
     );
   });
 
@@ -70,9 +72,13 @@ describe("the role check against Postgres", () => {
 
   it("refuses tally_app once it is a member of a superuser role or the owner role", async () => {
     const su = await factsAfter(["CREATE ROLE tally_check_su NOLOGIN SUPERUSER", "GRANT tally_check_su TO tally_app"], "tally_app");
-    expect(su.privilegedRoles).toEqual(["tally_check_su"]);
+    expect(su.memberOfRoles).toEqual(["tally_check_su"]);
     const ownerMember = await factsAfter(["GRANT tally_owner TO tally_app"], "tally_app");
     expect(ownerMember.ownedTables).toEqual([...APP_TABLES].sort());
+    // tally_owner owns the database, which makes it (and so its members) pg_database_owner too.
+    expect(ownerMember.memberOfRoles).toEqual(["pg_database_owner", "tally_owner"]);
+    const bypass = await factsAfter(["CREATE ROLE tally_check_b NOLOGIN BYPASSRLS", "GRANT tally_check_b TO tally_app"], "tally_app");
+    expect(bypass.memberOfRoles).toEqual(["tally_check_b"]);
   });
 
   it("sees a table whose row-level security was disabled, or no longer forced", async () => {
@@ -80,6 +86,8 @@ describe("the role check against Postgres", () => {
       const facts = await factsAfter([`ALTER TABLE invoices ${change}`], "tally_app");
       expect(facts.unprotectedTables, change).toEqual(["invoices"]);
     }
+    const memberships = await factsAfter(["ALTER TABLE memberships NO FORCE ROW LEVEL SECURITY"], "tally_app");
+    expect(memberships.unprotectedTables).toEqual(["memberships"]);
     expect((await readRoleFacts(app)).unprotectedTables).toEqual([]);
   });
 
@@ -96,11 +104,32 @@ describe("the role check against Postgres", () => {
       "tally_app",
     );
     expect(restrictive.policyProblems).toContain("unexpected policy extra on customers");
+    // The migration's own policy, recreated as RESTRICTIVE with the same expressions: only the permissive
+    // check sees it (round 2: that check could be removed with every test green).
+    const condition = "organization_id = NULLIF(current_setting('app.organization_id', true), '')::uuid";
+    const sameButRestrictive = await factsAfter(
+      [
+        "DROP POLICY tenant_isolation ON customers",
+        `CREATE POLICY tenant_isolation ON customers AS RESTRICTIVE USING (${condition}) WITH CHECK (${condition})`,
+      ],
+      "tally_app",
+    );
+    expect(sameButRestrictive.policyProblems).toEqual([
+      "a policy is restrictive or limited to particular roles, unlike the migration's",
+    ]);
+    // Only WITH CHECK loosened (cross-tenant writes, reads unchanged).
+    const looseCheck = await factsAfter(["ALTER POLICY tenant_isolation ON invoices WITH CHECK (true)"], "tally_app");
+    expect(looseCheck.policyProblems).toEqual(["policy tenant_isolation on invoices differs from the migration's"]);
   });
 
   it("sees privileges the app role must not hold", async () => {
     const facts = await factsAfter(
-      ["GRANT ALL ON customers TO tally_app", "GRANT DELETE ON users TO tally_app"],
+      [
+        "GRANT ALL ON customers TO tally_app",
+        "GRANT DELETE ON users, organizations TO tally_app",
+        "GRANT UPDATE (user_id) ON memberships TO tally_app",
+        "GRANT UPDATE (name) ON users, organizations TO tally_app",
+      ],
       "tally_app",
     );
     expect(facts.forbiddenPrivileges).toEqual(
@@ -110,7 +139,12 @@ describe("the role check against Postgres", () => {
         "TRIGGER on customers",
         "INSERT (id) on customers",
         "UPDATE (organization_id) on customers",
+        "UPDATE (id) on customers",
         "DELETE on users",
+        "DELETE on organizations",
+        "UPDATE (user_id) on memberships",
+        "UPDATE (any column) on users",
+        "UPDATE (any column) on organizations",
       ]),
     );
   });

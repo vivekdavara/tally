@@ -35,7 +35,7 @@ describe("the startup check", () => {
     try {
       await import("@/instrumentation-node");
       expect(exit).toHaveBeenCalledWith(1);
-      expect(log.mock.calls[0]?.join(" ")).toMatch(/not starting: refusing to serve: tally_owner owns/);
+      expect(log.mock.calls[0]?.join(" ")).toMatch(/not starting: refusing to serve: .*tally_owner owns/);
     } finally {
       process.env.DATABASE_URL = previous;
       exit.mockRestore();

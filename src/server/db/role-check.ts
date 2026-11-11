@@ -48,6 +48,10 @@ export const FORBIDDEN: { table: string; privilege: string; column?: string }[] 
   { table: "memberships", privilege: "UPDATE", column: "user_id" },
   { table: "users", privilege: "DELETE" },
   { table: "organizations", privilege: "DELETE" },
+  // "*": any column (has_any_column_privilege). Nothing may change a user (an email or password hash written
+  // across organizations is an account takeover) or an organization (it has no row-level security).
+  { table: "users", privilege: "UPDATE", column: "*" },
+  { table: "organizations", privilege: "UPDATE", column: "*" },
   ...RLS_TABLES.map((table) => ({ table, privilege: "UPDATE", column: "organization_id" })),
 ];
 
@@ -55,8 +59,16 @@ export interface RoleFacts {
   role: string;
   superuser: boolean;
   bypassRls: boolean;
-  /** Other roles this one is a member of (so can SET ROLE to) that are superusers or have BYPASSRLS. */
-  privilegedRoles: string[];
+  /** The role the connection logged in as, when it isn't the current one (it set role at connect). */
+  sessionUser: string | null;
+  /**
+   * Every other role this one is a member of. tally_app should be a member of none: SET ROLE to any of them
+   * (a superuser, a BYPASSRLS role, pg_write_all_data, ...) would escape the checks below, which look only at
+   * this role's own privileges because it is NOINHERIT.
+   */
+  memberOfRoles: string[];
+  /** SECURITY DEFINER functions this role may execute: they run as their owner, who may bypass RLS. */
+  definerFunctions: string[];
   /** Application tables whose owner this role is, or can become (SET ROLE). */
   ownedTables: string[];
   /** RLS tables where row-level security isn't both enabled and forced. */
@@ -77,8 +89,14 @@ export function roleProblems(facts: RoleFacts): string[] {
   const problems: string[] = [];
   if (facts.superuser) problems.push(`${facts.role} is a superuser, which bypasses row-level security`);
   if (facts.bypassRls) problems.push(`${facts.role} has BYPASSRLS`);
-  if (facts.privilegedRoles.length > 0) {
-    problems.push(`${facts.role} can SET ROLE to ${facts.privilegedRoles.join(", ")}, which bypass row-level security`);
+  if (facts.sessionUser) {
+    problems.push(`the connection logged in as ${facts.sessionUser}, not ${facts.role}, and can RESET ROLE`);
+  }
+  if (facts.memberOfRoles.length > 0) {
+    problems.push(`${facts.role} can SET ROLE to ${facts.memberOfRoles.join(", ")}`);
+  }
+  if (facts.definerFunctions.length > 0) {
+    problems.push(`${facts.role} may execute SECURITY DEFINER functions: ${facts.definerFunctions.join(", ")}`);
   }
   if (facts.ownedTables.length > 0) {
     problems.push(`${facts.role} owns or can become the owner of ${facts.ownedTables.join(", ")}`);
@@ -125,7 +143,9 @@ export async function readRoleFacts(client: Pick<Db, "$queryRaw">): Promise<Role
       role: string;
       superuser: boolean;
       bypass_rls: boolean;
-      privileged: string[];
+      session_user: string;
+      member_of: string[];
+      definers: string[];
       owned: string[];
       unprotected: string[];
       held: string[];
@@ -135,10 +155,14 @@ export async function readRoleFacts(client: Pick<Db, "$queryRaw">): Promise<Role
     SELECT r.rolname::text AS role,
            r.rolsuper AS superuser,
            r.rolbypassrls AS bypass_rls,
+           session_user::text AS session_user,
            ARRAY(SELECT o.rolname::text FROM pg_roles o
-                 WHERE o.oid <> r.oid AND (o.rolsuper OR o.rolbypassrls)
-                   AND pg_has_role(r.oid, o.oid, 'MEMBER')
-                 ORDER BY 1) AS privileged,
+                 WHERE o.oid <> r.oid AND pg_has_role(r.oid, o.oid, 'MEMBER')
+                 ORDER BY 1) AS member_of,
+           ARRAY(SELECT p.oid::regprocedure::text FROM pg_proc p JOIN pg_namespace pn ON pn.oid = p.pronamespace
+                 WHERE p.prosecdef AND pn.nspname NOT IN ('pg_catalog', 'information_schema')
+                   AND has_function_privilege(r.oid, p.oid, 'EXECUTE')
+                 ORDER BY 1) AS definers,
            ARRAY(SELECT c.relname::text FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
                  WHERE n.nspname = 'public' AND c.relname = ANY(${appTables}::text[])
                    AND pg_has_role(r.oid, c.relowner, 'MEMBER')
@@ -149,11 +173,13 @@ export async function readRoleFacts(client: Pick<Db, "$queryRaw">): Promise<Role
                                      AND c.relrowsecurity AND c.relforcerowsecurity)
                  ORDER BY 1) AS unprotected,
            ARRAY(SELECT CASE WHEN f.col = '' THEN f.priv || ' on ' || f.tbl
+                             WHEN f.col = '*' THEN f.priv || ' (any column) on ' || f.tbl
                              ELSE f.priv || ' (' || f.col || ') on ' || f.tbl END
                  FROM unnest(${forbiddenTables}::text[], ${forbiddenPrivileges}::text[], ${forbiddenColumns}::text[])
                       AS f(tbl, priv, col)
                  WHERE to_regclass('public.' || f.tbl) IS NOT NULL
                    AND CASE WHEN f.col = '' THEN has_table_privilege(r.oid, ('public.' || f.tbl)::regclass, f.priv)
+                            WHEN f.col = '*' THEN has_any_column_privilege(r.oid, ('public.' || f.tbl)::regclass, f.priv)
                             ELSE has_column_privilege(r.oid, ('public.' || f.tbl)::regclass, f.col, f.priv) END
                  ORDER BY 1) AS held,
            NULLIF(current_setting('app.organization_id', true), '') AS preset
@@ -181,7 +207,9 @@ export async function readRoleFacts(client: Pick<Db, "$queryRaw">): Promise<Role
     role: row.role,
     superuser: row.superuser,
     bypassRls: row.bypass_rls,
-    privilegedRoles: row.privileged,
+    sessionUser: row.session_user === row.role ? null : row.session_user,
+    memberOfRoles: row.member_of,
+    definerFunctions: row.definers,
     ownedTables: row.owned,
     unprotectedTables: row.unprotected,
     policyProblems,
