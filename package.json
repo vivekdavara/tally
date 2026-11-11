@@ -12,6 +12,7 @@
     "dev": "next dev --port 8117",
     "build": "next build",
     "start": "next start --port 8117",
+    "postinstall": "prisma generate",
     "typecheck": "tsc --noEmit",
     "lint": "eslint --max-warnings 0 .",
     "test": "vitest run",
