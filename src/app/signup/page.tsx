@@ -1,12 +1,13 @@
 import Link from "next/link";
 import { redirect } from "next/navigation";
-import { auth } from "@/auth";
+import { getCurrentUser } from "@/server/dal";
 import { SignUpForm } from "./signup-form";
 
 export const metadata = { title: "Create an organization · Tally" };
 
 export default async function SignUpPage() {
-  if ((await auth())?.user?.id) {
+  // The user, not just a session: a session can outlive its user (see getCurrentUser).
+  if (await getCurrentUser()) {
     redirect("/o");
   }
   return (

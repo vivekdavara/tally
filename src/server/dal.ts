@@ -14,14 +14,24 @@ export interface CurrentUser {
   name: string;
 }
 
-/** The signed-in user, read from the database (so a deleted user is signed out), or a redirect to sign in. */
-export const requireUser = cache(async (): Promise<CurrentUser> => {
+/**
+ * The signed-in user, read from the database, or null. A session whose user no longer exists counts as
+ * signed out: JWTs can't be revoked, so the cookie can outlive the account. Every page that asks "is someone
+ * signed in?" must use this, not the session alone, or /signin (seeing a session) and /o (finding no user)
+ * redirect to each other forever.
+ */
+export const getCurrentUser = cache(async (): Promise<CurrentUser | null> => {
   const session = await auth();
   const id = session?.user?.id;
   if (!id) {
-    redirect("/signin");
+    return null;
   }
-  const user = await db().user.findUnique({ where: { id }, select: { id: true, email: true, name: true } });
+  return db().user.findUnique({ where: { id }, select: { id: true, email: true, name: true } });
+});
+
+/** The signed-in user, or a redirect to sign in. */
+export const requireUser = cache(async (): Promise<CurrentUser> => {
+  const user = await getCurrentUser();
   if (!user) {
     redirect("/signin");
   }

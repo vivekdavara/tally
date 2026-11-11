@@ -118,3 +118,16 @@ describe("requireTenant", () => {
     expect(await digestOf(requireTenant(owner.slug))).toBe("NEXT_HTTP_ERROR_FALLBACK;404");
   });
 });
+
+describe("getCurrentUser", () => {
+  it("is null without a session and for a session whose user is gone, so sign-in pages render", async () => {
+    const { getCurrentUser } = await import("@/server/dal");
+    expect(await getCurrentUser()).toBeNull();
+    const gone = await newAccount();
+    await db().user.delete({ where: { id: gone.userId } });
+    session.current = { user: { id: gone.userId } };
+    expect(await getCurrentUser()).toBeNull();
+    session.current = { user: { id: owner.userId } };
+    expect(await getCurrentUser()).toMatchObject({ id: owner.userId });
+  });
+});

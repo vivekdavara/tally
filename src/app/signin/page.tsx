@@ -1,12 +1,13 @@
 import Link from "next/link";
 import { redirect } from "next/navigation";
-import { auth } from "@/auth";
+import { getCurrentUser } from "@/server/dal";
 import { SignInForm } from "./signin-form";
 
 export const metadata = { title: "Sign in · Tally" };
 
 export default async function SignInPage() {
-  if ((await auth())?.user?.id) {
+  // The user, not just a session: a session can outlive its user (see getCurrentUser).
+  if (await getCurrentUser()) {
     redirect("/o");
   }
   return (
