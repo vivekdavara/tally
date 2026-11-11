@@ -7,6 +7,12 @@ export const TENANT_TABLES = ["customers", "invoices", "invoice_lines"] as const
 /** A transaction in which app.organization_id is set: every query in it sees one tenant's rows. */
 export type TenantTx = Prisma.TransactionClient;
 
+// A statement waits at most 2 s for a lock and runs at most 5 s; a transaction may take 30 s. Prisma's
+// transaction timeout is the one to avoid reaching (see withTenant).
+const LOCK_TIMEOUT_MS = 2_000;
+const STATEMENT_TIMEOUT_MS = 5_000;
+const TRANSACTION_TIMEOUT_MS = 30_000;
+
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 function isThenable(value: unknown): value is PromiseLike<unknown> {
@@ -19,7 +25,8 @@ function isThenable(value: unknown): value is PromiseLike<unknown> {
 
 /**
  * Wraps a Prisma promise (which runs only when someone calls `then`) so that once it starts, it's recorded
- * in `inflight` until it settles. Starting stays lazy: a query fn builds but never awaits doesn't run.
+ * in `inflight` until it settles. Starting stays lazy: a query fn builds but never awaits doesn't run. Other
+ * members (the fluent API: `tx.customer.findUnique(...).invoices()`) pass through, their results tracked too.
  */
 function tracked<T>(lazy: PromiseLike<T>, inflight: Set<Promise<unknown>>): Promise<T> {
   let started: Promise<T> | undefined;
@@ -35,12 +42,25 @@ function tracked<T>(lazy: PromiseLike<T>, inflight: Set<Promise<unknown>>): Prom
     }
     return started;
   };
-  return {
-    then: (onFulfilled, onRejected) => start().then(onFulfilled, onRejected),
-    catch: (onRejected) => start().catch(onRejected),
-    finally: (onFinally) => start().finally(onFinally),
+  const own: Record<string | symbol, unknown> = {
+    then: (onFulfilled?: (v: T) => unknown, onRejected?: (e: unknown) => unknown) => start().then(onFulfilled, onRejected),
+    catch: (onRejected?: (e: unknown) => unknown) => start().catch(onRejected),
+    finally: (onFinally?: () => void) => start().finally(onFinally),
     [Symbol.toStringTag]: "TrackedPrismaPromise",
-  } as Promise<T>;
+  };
+  return new Proxy(lazy as object, {
+    get(target, property) {
+      if (property in own) return own[property];
+      const value = Reflect.get(target, property);
+      if (typeof value === "function") {
+        return (...args: unknown[]) => {
+          const result = (value as (...a: unknown[]) => unknown).apply(target, args);
+          return isThenable(result) ? tracked(result, inflight) : result;
+        };
+      }
+      return value;
+    },
+  }) as Promise<T>;
 }
 
 /** A view of `target` whose methods (and model delegates' methods) return tracked promises. */
@@ -72,7 +92,7 @@ function tracking<T extends object>(target: T, inflight: Set<Promise<unknown>>):
  * A query made on any other client inside `fn` runs on another connection, without the setting, and sees
  * no tenant rows at all.
  *
- * Two guards around `fn`, each for a way the transaction's outcome and its writes could disagree:
+ * Guards around `fn`, each for a way the transaction's outcome and its writes could disagree:
  * - If `fn` rejects while one of its queries is still running (a Promise.all sibling threw), wait for the
  *   running queries before rolling back. Prisma 7.10 otherwise sends ROLLBACK and releases the connection,
  *   and the rest of a multi-query operation (a nested write) then runs outside any transaction and commits.
@@ -92,6 +112,11 @@ export async function withTenant<T>(
   }
   return client.$transaction(async (tx) => {
     await tx.$executeRaw`SELECT set_config('app.organization_id', ${organizationId}, true)`;
+    // Bound every statement well inside Prisma's transaction timeout. When Prisma's own timeout fires, it
+    // rolls back and releases the connection mid-operation, and the rest of a nested write runs outside
+    // any transaction (review round 2): a statement stuck on a lock now fails on its own first.
+    await tx.$executeRaw`SELECT set_config('lock_timeout', ${`${LOCK_TIMEOUT_MS}ms`}, true),
+                                set_config('statement_timeout', ${`${STATEMENT_TIMEOUT_MS}ms`}, true)`;
     const inflight = new Set<Promise<unknown>>();
     let result: T;
     try {
@@ -108,5 +133,5 @@ export async function withTenant<T>(
     // Fails with 25P02 ("current transaction is aborted") if fn swallowed a database error.
     await tx.$executeRaw`SELECT 1`;
     return result;
-  });
+  }, { timeout: TRANSACTION_TIMEOUT_MS, maxWait: 5_000 });
 }
