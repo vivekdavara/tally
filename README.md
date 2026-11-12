@@ -116,41 +116,46 @@ and everything else runs.
 
 ## Results (day 2)
 
-Apple M3 laptop (macOS 26.6.2, Node 23.11, Postgres 14.20), **on battery**, with a review agent running tests on the
-same machine during the benchmark (load average 2.3).
+Apple M3 laptop (macOS 26.6.2, Node 23.11, Postgres 14.20). The tests and the first benchmark run were on battery; the
+final benchmark runs on AC, with a review agent running tests on the same machine (load average 4.7 to 5.5).
 
-- **Tests:** 307 Vitest tests in 33 files (`npm run check`, 24.8 s with files run one at a time), 98 of them new
-  today; 14 Playwright tests (`npm run e2e`, 9.1 s), 3 new. The new ones: money.ts against a differently written
+- **Tests:** 377 Vitest tests in 45 files (`npm run check`, 27.6 s with files run one at a time), 168 of them new
+  today; 16 Playwright tests (`npm run e2e`, 13.5 s), 5 new. Among the new: money.ts against a differently written
   oracle (20,000 random roundings, 3,000 random invoices); SQL `invoice_totals()` equal to money.ts on 600 random
   invoices, where per-line rounding would have differed on more than 50 (`tests/integration/totals-differential.test.ts`;
   making money.ts round half down fails it); the life cycle through the services and through raw SQL;
-  **40 concurrent finalizations with 10 rolled back numbered exactly 1..30**; a line insert racing a finalization
-  shown blocked on the lock in `pg_stat_activity`, then refused; the PDF's every xref offset, its text, pagination
-  and encoding; e2e of a draft finalized to INV-0001 with a total worked out by hand ($53.42), its PDF, and 404s for
-  another organization's ids.
-- **What gapless numbering costs** (`npm run bench:finalize`: 1,000 finalizations per case after 100 warm-up, each
-  invoice 5 lines, through `withTenant` as `tally_app`, a pool of as many connections as workers; synthetic):
+  **40 concurrent finalizations with 10 rolled back numbered exactly 1..30**; a line insert racing a finalization,
+  and a draft racing its customer's deletion, each shown blocked on the lock in `pg_stat_activity`, then refused; the
+  PDF's every xref offset, its text, pagination, encoding and margins; both review rounds' findings
+  (`tests/review-d2/`, `tests/review-d2r2/`); e2e of a draft finalized to INV-0001 with a total worked out by hand
+  ($53.42), its PDF, the customer and draft actions, and 404s for another organization's ids.
+- **What gapless numbering costs** (`npm run bench:finalize` on the final code: 1,000 finalizations per case after
+  100 warm-up, each invoice 5 lines, through `withTenant` as `tally_app`, a pool of as many connections as workers;
+  synthetic; on AC, load 5.2 → 4.7, slept 1 ms):
 
   | Case | Workers | Finalizations/s | p50 | p95 | p99 |
   |---|---|---|---|---|---|
-  | one organization | 1 | 1,011 | 0.88 ms | 1.34 ms | 1.65 ms |
-  | spread over organizations | 1 | 1,181 | 0.80 ms | 1.07 ms | 1.60 ms |
-  | one organization | 4 | 2,394 | 1.51 ms | 2.65 ms | 3.54 ms |
-  | spread | 4 | 2,930 | 1.31 ms | 1.87 ms | 2.07 ms |
-  | one organization | 16 | 2,033 | 5.26 ms | 22.57 ms | 33.91 ms |
-  | spread | 16 | 3,076 | 4.67 ms | 7.29 ms | 8.03 ms |
+  | one organization | 1 | 771 | 1.25 ms | 1.83 ms | 2.32 ms |
+  | spread over organizations | 1 | 813 | 0.89 ms | 2.01 ms | 4.09 ms |
+  | one organization | 4 | 1,507 | 2.31 ms | 4.33 ms | 7.18 ms |
+  | spread | 4 | 2,171 | 1.67 ms | 2.64 ms | 5.01 ms |
+  | one organization | 16 | 1,669 | 6.49 ms | 23.52 ms | 34.95 ms |
+  | spread | 16 | 2,655 | 5.63 ms | 8.32 ms | 10.19 ms |
 
-  One organization's finalizations take turns on its counter row from the upsert to `COMMIT` (three round trips),
-  so at 16 concurrent finalizers in one organization the p95 is three times the spread case's and throughput stops
-  growing; across organizations nothing waits. 16 simultaneous finalizations in one organization is far beyond what an
-  invoicing tenant does, so the lock is the right trade for numbers without gaps. The run ends by checking every
-  organization's numbers are exactly 1..n. With one worker there's nothing to wait for, so the
-  two 1-worker rows measure the same path; their gap is run-to-run variation (the cases run one after another, not
-  interleaved).
-- **PDFs:** rendering takes 0.107 ms for a 2-line invoice (3,055 bytes) and 0.456 ms for 100 lines over 4 pages
-  (28,541 bytes), median of 200 (same run). On the sample invoices, pdfplumber's text extraction returns every field,
-  and every right-aligned line ends within 0.05 pt of the margin (amounts in € excepted: pdfminer's built-in
-  Helvetica metrics have no Euro glyph, so it measures € as zero-width).
+  One organization's finalizations take turns on its counter row from the upsert to `COMMIT` (three round trips), so
+  at 16 concurrent finalizers in one organization the p95 is about three times the spread case's and throughput stops
+  growing; across organizations nothing waits. A repeat run right after gave the same shape (16 workers: p95 24.46 ms
+  vs 7.53 ms, 1,710 vs 2,882/s), and so did the first run, on battery before the counter guard and the bill-to copy
+  were added (22.57 ms vs 7.29 ms, 2,033 vs 3,076/s). With one worker nothing waits, so the two 1-worker rows measure
+  the same path; their gap, and the drift between runs (579 to 1,181/s), is machine noise: the cases run one after
+  another, not interleaved, on a loaded laptop. 16 simultaneous finalizations in one organization is far beyond what
+  an invoicing tenant does, so the lock is the right trade for numbers without gaps. Every run ends by checking each
+  organization's numbers are exactly 1..n.
+- **PDFs:** 0.115 ms for a 2-line invoice (3,055 bytes) and 0.535 ms for 100 lines over 4 pages (28,541 bytes),
+  median of 200 (same run). On the sample invoices, pdfplumber's text extraction returns every field and every
+  right-aligned line ends within 0.004 pt of the margin (amounts in € excepted: pdfminer's built-in Helvetica metrics
+  have no Euro glyph). The writer's widths for all 120 non-ASCII characters Windows-1252 can encode match pdfminer's
+  Helvetica metrics (regular weight; bold not compared).
 
 ## Results (day 1)
 
@@ -211,7 +216,21 @@ A review agent at `0eff04c` (its own worktree and database, 11 minutes, findings
   details (now copied at finalization); a customer deleted mid-request made a draft's creation a 500 (now "no
   customer"); bidirectional override characters were accepted in names and descriptions (now refused).
 
-Round 2 ran on the fixes; see below.
+Round 2 (at `4cb2c26`, on round 1's fixes, 13 minutes, `tests/review-d2r2/`): seven bugs, five of them in or
+next to round 1's fixes:
+
+- the role check passed a connection with `session_replication_role = replica` (no trigger fires, not the guards
+  nor the foreign keys'), and called a guard set to `ENABLE ALWAYS` missing;
+- deleting an organization with a final invoice depended on which cascade Postgres fired first (they fire in
+  trigger-name order); the lines guard now lets the organization's own cascade through, like the invoices guard;
+- PDF: round 1's fitted columns could squeeze a description into more lines than a page holds (drawn below the page);
+  every non-ASCII character was measured as a digit (capitals with umlauts ran over the title); every INR amount
+  printed "?53.42" (₹ isn't in Windows-1252: the PDF now prints "INR 53.42"); a decomposed é could be cut from its
+  accent;
+- the customer races, already fixed after the reviewed commit.
+
+It also pointed out that the counter guard's refusal was mapped to a quiet "something went wrong"; it stays an error
+now, so it's logged.
 
 Found by my own tests on day 2: the issue time was taken before the number (so #N+1 could be stamped earlier than #N);
 a duplicate customer email was a 500, because the service caught the unique violation inside a transaction Postgres
