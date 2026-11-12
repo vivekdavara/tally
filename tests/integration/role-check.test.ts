@@ -149,6 +149,34 @@ describe("the role check against Postgres", () => {
     );
   });
 
+  it.each([
+    // Day 2 (migrations/*_invoicing): the trigger writes these, never the application.
+    ["INSERT", "number"],
+    ["UPDATE", "number"],
+    ["INSERT", "issued_at"],
+    ["UPDATE", "issued_at"],
+    ["INSERT", "subtotal_minor"],
+    ["UPDATE", "subtotal_minor"],
+    ["INSERT", "tax_minor"],
+    ["UPDATE", "tax_minor"],
+    ["INSERT", "total_minor"],
+    ["UPDATE", "total_minor"],
+    ["UPDATE", "currency"],
+  ])("sees %s (%s) on invoices, one grant at a time", async (privilege, column) => {
+    const facts = await factsAfter([`GRANT ${privilege} (${column}) ON invoices TO tally_app`], "tally_app");
+    expect(facts.forbiddenPrivileges).toEqual([`${privilege} (${column}) on invoices`]);
+  });
+
+  it("sees DELETE or an organization_id change on invoice_counters", async () => {
+    const facts = await factsAfter(["GRANT DELETE, UPDATE (organization_id) ON invoice_counters TO tally_app"], "tally_app");
+    expect(facts.forbiddenPrivileges).toEqual(["DELETE on invoice_counters", "UPDATE (organization_id) on invoice_counters"]);
+  });
+
+  it("sees a policy added to invoice_counters", async () => {
+    const facts = await factsAfter(["CREATE POLICY wide_open ON invoice_counters USING (true)"], "tally_app");
+    expect(facts.policyProblems).toEqual(["unexpected policy wide_open on invoice_counters"]);
+  });
+
   it("sees a connection that starts with a tenant already set", async () => {
     // As if DATABASE_URL carried options=-c app.organization_id=..., or the role had it as a default.
     const tenant = crypto.randomUUID();
