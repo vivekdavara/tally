@@ -119,15 +119,15 @@ and everything else runs.
 Apple M3 laptop (macOS 26.6.2, Node 23.11, Postgres 14.20). The first benchmark run was on battery; the final ones on
 AC, with a review agent running tests on the same machine (load average 4.7 to 5.5).
 
-- **Tests:** 386 Vitest tests in 48 files (`npm run check`, 27.57 s with files run one at a time), 177 of them new
-  today; 16 Playwright tests (`npm run e2e`, 13.5 s), 5 new. Among the new: money.ts against a differently written
+- **Tests:** 392 Vitest tests in 50 files (`npm run check`, 26.24 s with files run one at a time), 183 of them new
+  today; 16 Playwright tests (`npm run e2e`, 11.8 s), 5 new. Among the new: money.ts against a differently written
   oracle (20,000 random roundings, 3,000 random invoices); SQL `invoice_totals()` equal to money.ts on 600 random
   invoices, where per-line rounding would have differed on more than 50 (`tests/integration/totals-differential.test.ts`;
   making money.ts round half down fails it); the life cycle through the services and through raw SQL;
   **40 concurrent finalizations with 10 rolled back numbered exactly 1..30**; a line insert racing a finalization,
   and a draft racing its customer's deletion, each shown blocked on the lock in `pg_stat_activity`, then refused; the
-  PDF's every xref offset, its text, pagination, encoding and margins; the three review rounds' findings
-  (`tests/review-d2/`, `tests/review-d2r2/`, `tests/review-d2r3/`); e2e of a draft finalized to INV-0001 with a total worked out by hand
+  PDF's every xref offset, its text, pagination, encoding and margins; the four review rounds' findings
+  (`tests/review-d2/` to `tests/review-d2r4/`); e2e of a draft finalized to INV-0001 with a total worked out by hand
   ($53.42), its PDF, the customer and draft actions, and 404s for another organization's ids.
 - **What gapless numbering costs** (`npm run bench:finalize` on the final code: 1,000 finalizations per case after
   100 warm-up, each invoice 5 lines, through `withTenant` as `tally_app`, a pool of as many connections as workers;
@@ -237,15 +237,23 @@ three bugs, no database bug. Round 2's grapheme wrapping couldn't cut a single c
 with 60 combining marks put a name at x = 1,058 on a 612 pt page); the six-line address rule counted line breaks,
 not printed lines, so an accepted address could lose its country on the PDF; the bidi refusal missed the
 organization name and the zero-width direction marks. Fixed in `50ff59c`, together with a check that the worst
-valid name, email and address print in full on page 1. As on earlier projects, each round found bugs in the previous
-round's fixes, so a fourth would likely find more; I stopped at three for time.
+valid name, email and address print in full on page 1. 
+
+Round 4 (at `baba0a3`, on round 3's fix only, 3 minutes, `tests/review-d2r4/`): two bugs in that fix's claim that
+whatever the forms accept prints in full. Words that don't fit two to a line waste most of each, so a valid
+194-character customer name wrapped to 15 lines and was cut at 9 (the form now refuses names that wouldn't print in
+full); an ordinary 95-character organization name lost its end in the letterhead (it now drops to 12 pt over up to
+four lines, and sign-up refuses only what wouldn't fit even then). Fixed in `4333c5d`. Every round found bugs in the
+previous round's fixes; I stopped at four, with round 4's findings narrower than round 1's.
 
 Found by my own tests on day 2: the issue time was taken before the number (so #N+1 could be stamped earlier than #N);
 a duplicate customer email was a 500, because the service caught the unique violation inside a transaction Postgres
-had already aborted; bold text was measured with regular widths (the "Amount" header overran the margin). One
-unexplained failure: `tests/review2/orphan-writes.test.ts`'s unawaited-write test failed once with 25P02 during a
-full run while the review agent was running tests on the same cluster; it passed 5 of 5 alone and in every full run
-since. Its error is swallowed by design, so the cause isn't known.
+had already aborted; bold text was measured with regular widths (the "Amount" header overran the margin). A failure
+that looked flaky: `tests/review2/orphan-writes.test.ts` failed twice with 25P02, each time while a review agent ran
+tests. Once the test reported its inner error, the cause showed: the test's organization vanished mid-run
+(`customers_organization_id_fkey`), because an agent ran unit test files without the test-database settings, so its
+global setup truncated the default `tally_test` under my run. Test runs now hold an advisory lock on their database,
+and a second run stops with a clear message (`77bf823`).
 
 ### Day 1
 

@@ -240,8 +240,9 @@ would burn a number and leave a gap. That's fine for ids, wrong for invoice numb
 expect to run in sequence without gaps.
 
 **What does the lock cost?**
-Measured (`npm run bench:finalize`, README "Results (day 2)"): with 16 concurrent finalizations in one organization,
-p95 22.6 ms and 2,033/s, against 7.3 ms and 3,076/s when the same 16 workers finalize in 16 different organizations.
+Measured (`npm run bench:finalize` on the final code, README "Results (day 2)"): with 16 concurrent finalizations in
+one organization, p95 23.5 ms and 1,669/s, against 8.3 ms and 2,655/s when the same 16 workers finalize in 16
+different organizations (three runs, the same shape each time).
 The lock only serializes one organization against itself, and only from the upsert to `COMMIT`.
 
 **Why is the issue time taken after the number?**
@@ -296,7 +297,9 @@ squeeze a description into more lines than a page; measuring every non-ASCII cha
 "?"; a decomposed accent cut from its letter; the role check missing `session_replication_role = replica` (no trigger
 fires at all) and calling an `ENABLE ALWAYS` trigger missing; and an organization delete that worked only because of
 the order Postgres fires cascades in. Each is a test in `tests/review-d2r2/`. Round 3 found three more, two in round
-2's fixes (a grapheme cluster wider than the line; an address rule that counted line breaks, not printed lines).
+2's fixes (a grapheme cluster wider than the line; an address rule that counted line breaks, not printed lines), and
+round 4 two in round 3's (names that wrap to more lines than their character count suggests, because words waste line
+space).
 The lesson I take: a fix is new code and needs its own review.
 
 **Why not make the counter function `SECURITY DEFINER`, so the app needs no grant on the counter at all?**

@@ -364,9 +364,10 @@ earns its place). A currency symbol outside Windows-1252 (₹) would be the app'
 ISO code ("INR 53.42") in the PDF only. Measuring uses Helvetica's AFM widths for every character the encoding has
 (accented letters through their base letter); text is wrapped as its NFC form, by grapheme cluster. Long descriptions wrap (and one taller than a page continues on the
 next); long invoices break across pages with the table header repeated, and the totals block checks for room row by row (up to 100 tax rates is longer
-than a page); the bill-to block wraps to its column and is capped at what valid input can wrap to at worst (9 lines of name, 11
-of email, 12 of address; the form refuses an address that would wrap past 12), so whatever the forms accept prints in
-full; a grapheme cluster wider than the line (a letter with dozens of combining marks) is cut by code point; columns are sized to their widest cell, so even the largest amounts the limits allow don't overlap (an
+than a page); the bill-to block wraps to its column and is capped (9 lines of name, 11 of email, 12 of address), and the forms
+refuse a name or address that would wrap past its cap (an email can't), so whatever they accept prints in full; the
+organization's name takes two lines at 18 pt beside the title, or up to four at 12 pt, and sign-up refuses one that
+wouldn't fit even then; a grapheme cluster wider than the line (a letter with dozens of combining marks) is cut by code point; columns are sized to their widest cell, so even the largest amounts the limits allow don't overlap (an
 ordinary invoice keeps the default widths); drafts say they're drafts on every page. The output is deterministic. The route
 is `GET /o/<slug>/invoices/<id>/pdf`, through `requireTenant`, `Cache-Control: private, no-store`.
 
@@ -462,7 +463,9 @@ the same reason. The app listens on port 8117. Tests use a separate database, `t
   each finding of the review rounds, as the reviewer wrote it (its setup adapted where a later fix changed it, never
   its assertion's intent; a comment marks each adaptation), so the bug can't come back unnoticed.
 - Test files run one at a time: the role-check tests run DDL in transactions that roll back, which takes exclusive
-  locks other files' writes would wait on (a deadlock once, when they ran in parallel).
+  locks other files' writes would wait on (a deadlock once, when they ran in parallel). And one run at a time per
+  database: the global setup empties the tables, so it holds an advisory lock for the whole run, and a second run
+  against the same database stops at once (two did collide on day 2, and a test's organization vanished mid-run).
 - **CI (GitHub Actions):** a Postgres 14 service container; `npm ci`, the setup script, migrations, typecheck, lint,
   tests and `next build` on Node 22 and 24.
 
