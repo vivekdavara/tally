@@ -364,8 +364,9 @@ earns its place). A currency symbol outside Windows-1252 (₹) would be the app'
 ISO code ("INR 53.42") in the PDF only. Measuring uses Helvetica's AFM widths for every character the encoding has
 (accented letters through their base letter); text is wrapped as its NFC form, by grapheme cluster. Long descriptions wrap (and one taller than a page continues on the
 next); long invoices break across pages with the table header repeated, and the totals block checks for room row by row (up to 100 tax rates is longer
-than a page); the bill-to block wraps to its column and is capped (3 lines of name, 2 of email, the 6 lines an address
-may have); columns are sized to their widest cell, so even the largest amounts the limits allow don't overlap (an
+than a page); the bill-to block wraps to its column and is capped at what valid input can wrap to at worst (9 lines of name, 11
+of email, 12 of address; the form refuses an address that would wrap past 12), so whatever the forms accept prints in
+full; a grapheme cluster wider than the line (a letter with dozens of combining marks) is cut by code point; columns are sized to their widest cell, so even the largest amounts the limits allow don't overlap (an
 ordinary invoice keeps the default widths); drafts say they're drafts on every page. The output is deterministic. The route
 is `GET /o/<slug>/invoices/<id>/pdf`, through `requireTenant`, `Cache-Control: private, no-store`.
 

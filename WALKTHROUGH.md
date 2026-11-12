@@ -295,8 +295,9 @@ Seven bugs, five in or beside round 1's fixes, as on earlier projects: sizing PD
 squeeze a description into more lines than a page; measuring every non-ASCII character as a digit; INR's ₹ printing
 "?"; a decomposed accent cut from its letter; the role check missing `session_replication_role = replica` (no trigger
 fires at all) and calling an `ENABLE ALWAYS` trigger missing; and an organization delete that worked only because of
-the order Postgres fires cascades in. Each is a test in `tests/review-d2r2/`. The lesson I take: a fix is new code
-and needs its own review.
+the order Postgres fires cascades in. Each is a test in `tests/review-d2r2/`. Round 3 found three more, two in round
+2's fixes (a grapheme cluster wider than the line; an address rule that counted line breaks, not printed lines).
+The lesson I take: a fix is new code and needs its own review.
 
 **Why not make the counter function `SECURITY DEFINER`, so the app needs no grant on the counter at all?**
 A definer function runs with its owner's privileges: on these tables that's everything, far beyond the column grants
