@@ -17,7 +17,10 @@ import {
   listInvoices,
   markPaid,
   refusals,
+  getCustomer,
   removeLine,
+  TotalsMismatchError,
+  updateCustomer,
   updateLine,
   voidInvoice,
 } from "@/server/invoices/service";
@@ -338,5 +341,53 @@ describe("deleting an organization", () => {
         throw new Error("rolled back");
       }),
     ).rejects.toThrow(/rolled back/);
+  });
+});
+
+describe("reading an invoice", () => {
+  it("refuses to show one whose stored totals no longer match its lines", async () => {
+    const org = await newOrg();
+    const id = await draftWithLines(org, [line(1000n, 500n, 20000n)]);
+    value(await org.run((tx) => finalize(tx, id, 0)));
+    expect((await org.run((tx) => getInvoice(tx, id)))!.totals.total).toBe(600n);
+    // Tamper as a superuser with the triggers off (nothing in the application can write these columns).
+    await admin.$transaction(async (tx) => {
+      await tx.$executeRawUnsafe("SET LOCAL session_replication_role = replica");
+      await tx.$executeRaw`UPDATE invoices SET subtotal_minor = 400, total_minor = 500 WHERE id = ${id}::uuid`;
+    });
+    await expect(org.run((tx) => getInvoice(tx, id))).rejects.toThrow(TotalsMismatchError);
+  });
+});
+
+describe("customers", () => {
+  it("can share an email across organizations but not within one", async () => {
+    const [a, b] = [await newOrg(), await newOrg()];
+    const email = `shared-${unique()}@example.com`;
+    expect((await a.run((tx) => createCustomer(tx, { name: "A", email, address: null }))).ok).toBe(true);
+    // Unique per (organization_id, email): another organization's use of the email doesn't show.
+    expect((await b.run((tx) => createCustomer(tx, { name: "B", email, address: null }))).ok).toBe(true);
+    // The violation aborts the transaction (withTenant rolls it back); refusals reports it outside.
+    expect(await refusals(() => a.run((tx) => createCustomer(tx, { name: "A2", email, address: null })))).toEqual({ ok: false, reason: "email-taken" });
+    // An email change onto a taken one, the same way.
+    const other = value(await a.run((tx) => createCustomer(tx, { name: "A3", email: `o-${unique()}@example.com`, address: null })));
+    expect(await refusals(() => a.run((tx) => updateCustomer(tx, other, { name: "A3", email, address: null })))).toEqual({ ok: false, reason: "email-taken" });
+    // Caught inside the transaction instead, it would be an error at COMMIT, never a quiet success.
+    await expect(a.run(async (tx) => {
+      await tx.customer.create({ data: { organizationId: a.id, name: "dup", email } }).catch(() => undefined);
+      return "swallowed";
+    })).rejects.toThrow(/25P02|current transaction is aborted/);
+  });
+
+  it("can be renamed and deleted while they have no invoices; another organization's can't be touched", async () => {
+    const [a, b] = [await newOrg(), await newOrg()];
+    const id = value(await a.run((tx) => createCustomer(tx, { name: "Old", email: `r-${unique()}@example.com`, address: null })));
+    const input = { name: "New", email: `r-${unique()}@example.com`, address: "Somewhere" };
+    expect(await b.run((tx) => updateCustomer(tx, id, input))).toEqual({ ok: false, reason: "not-found" });
+    expect(await b.run((tx) => deleteCustomer(tx, id))).toEqual({ ok: false, reason: "not-found" });
+    expect(await a.run((tx) => updateCustomer(tx, id, input))).toEqual({ ok: true, value: undefined });
+    expect(await a.run((tx) => getCustomer(tx, id))).toMatchObject({ name: "New", address: "Somewhere" });
+    expect(await a.run((tx) => deleteCustomer(tx, id))).toEqual({ ok: true, value: undefined });
+    expect(await a.run((tx) => getCustomer(tx, id))).toBeNull();
+    expect(await a.run((tx) => getCustomer(tx, "not-a-uuid"))).toBeNull();
   });
 });

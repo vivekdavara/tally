@@ -56,7 +56,7 @@ export async function createCustomerAction(slug: string, _state: FormState, form
   const parsed = customerInput.safeParse(values);
   if (!parsed.success) return { fieldErrors: z.flattenError(parsed.error).fieldErrors, values };
   const { run } = await requireTenant(slug);
-  const result = await run((tx) => createCustomer(tx, parsed.data));
+  const result = await refusals(() => run((tx) => createCustomer(tx, parsed.data)));
   if (!result.ok) return { ...message(result), values };
   revalidatePath(`/o/${slug}/customers`);
   return {};
@@ -67,7 +67,7 @@ export async function updateCustomerAction(slug: string, id: string, _state: For
   const parsed = customerInput.safeParse(values);
   if (!parsed.success) return { fieldErrors: z.flattenError(parsed.error).fieldErrors, values };
   const { run } = await requireTenant(slug);
-  const result = await run((tx) => updateCustomer(tx, id, parsed.data));
+  const result = await refusals(() => run((tx) => updateCustomer(tx, id, parsed.data)));
   if (!result.ok) return { ...message(result), values };
   redirect(`/o/${slug}/customers`);
 }

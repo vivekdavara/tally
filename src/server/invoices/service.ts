@@ -36,27 +36,22 @@ export async function getCustomer(tx: TenantTx, id: string) {
   return tx.customer.findUnique({ where: { id }, select: { id: true, name: true, email: true, address: true } });
 }
 
+/**
+ * A customer whose email this organization already uses fails the insert (customers_organization_id_email_key),
+ * which aborts the transaction: call it inside refusals(() => run(...)), which reports it as "email-taken". The
+ * key starts with organization_id, so it can only collide with this organization's own customers.
+ */
 export async function createCustomer(tx: TenantTx, input: CustomerInput): Promise<Result<string>> {
   const organizationId = await tenantId(tx);
-  try {
-    const created = await tx.customer.create({ data: { organizationId, ...input }, select: { id: true } });
-    return ok(created.id);
-  } catch (error) {
-    // Unique per organization (organization_id first), so this can only mean this organization's customer.
-    if (violatedUniqueConstraint(error) === "customers_organization_id_email_key") return fail("email-taken");
-    throw error;
-  }
+  const created = await tx.customer.create({ data: { organizationId, ...input }, select: { id: true } });
+  return ok(created.id);
 }
 
+/** Like createCustomer, a taken email aborts the transaction; refusals() reports it. */
 export async function updateCustomer(tx: TenantTx, id: string, input: CustomerInput): Promise<Result> {
   if (!UUID.test(id)) return fail("not-found");
-  try {
-    const { count } = await tx.customer.updateMany({ where: { id }, data: input });
-    return count === 1 ? ok(undefined) : fail("not-found");
-  } catch (error) {
-    if (violatedUniqueConstraint(error) === "customers_organization_id_email_key") return fail("email-taken");
-    throw error;
-  }
+  const { count } = await tx.customer.updateMany({ where: { id }, data: input });
+  return count === 1 ? ok(undefined) : fail("not-found");
 }
 
 /** Only a customer with no invoices can be deleted (the invoices' foreign key refuses otherwise). */
@@ -302,6 +297,11 @@ export const markPaid = (tx: TenantTx, id: string) => transition(tx, id, "PAID")
 /** OPEN → VOID: the number stays used, the invoice no longer counts. */
 export const voidInvoice = (tx: TenantTx, id: string) => transition(tx, id, "VOID");
 
+/** Unique keys whose violation means something to the user, by constraint name. */
+const UNIQUE_REASONS: Record<string, string> = {
+  customers_organization_id_email_key: "email-taken",
+};
+
 /** The trigger codes (migrations/*_invoicing) as Result reasons, for callers that catch them. */
 export const TRIGGER_REASONS: Record<string, string> = {
   TL002: "final",
@@ -315,15 +315,17 @@ export const TRIGGER_REASONS: Record<string, string> = {
 };
 
 /**
- * Runs `fn`, turning a trigger's refusal into a Result. Wrap the whole `run(...)`, not a call inside it: the
- * refusal has aborted the transaction, and withTenant must see the error to roll back (a transaction that
- * caught it and returned would fail at COMMIT, by design).
+ * Runs `fn`, turning the database's refusals (a trigger's code, or a unique key in UNIQUE_REASONS) into a
+ * Result. Wrap the whole `run(...)`, not a call inside it: the refusal has aborted the transaction, and
+ * withTenant must see the error to roll back. A function that caught it inside the transaction and returned
+ * would fail at COMMIT instead (withTenant's SELECT 1, by design): the first version of createCustomer did
+ * that, and a duplicate email was a 500.
  */
 export async function refusals<T>(fn: () => Promise<Result<T>>): Promise<Result<T>> {
   try {
     return await fn();
   } catch (error) {
-    const reason = TRIGGER_REASONS[sqlState(error) ?? ""];
+    const reason = TRIGGER_REASONS[sqlState(error) ?? ""] ?? UNIQUE_REASONS[violatedUniqueConstraint(error) ?? ""];
     if (reason) return fail(reason);
     throw error;
   }
