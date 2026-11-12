@@ -23,15 +23,8 @@ import {
   toMajorString,
   type LineInput,
 } from "@/server/invoices/money";
+import { rng } from "../rng";
 
-/** A 64-bit linear congruential generator: deterministic, so a failing seed can be replayed. */
-export function rng(seed: bigint) {
-  let state = seed;
-  return (below: bigint): bigint => {
-    state = (state * 6364136223846793005n + 1442695040888963407n) & 0xffffffffffffffffn;
-    return (state >> 11n) % below;
-  };
-}
 
 /** n/d rounded half up, written as floor plus "is the remainder at least half": the oracle. */
 function referenceRound(n: bigint, d: bigint): bigint {
