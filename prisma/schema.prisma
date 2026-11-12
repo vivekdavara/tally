@@ -45,14 +45,15 @@ model User {
 
 // The tenant.
 model Organization {
-  id           String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  name         String
-  slug         String        @unique
-  createdAt    DateTime      @default(dbgenerated("clock_timestamp()")) @map("created_at") @db.Timestamptz(3)
-  memberships  Membership[]
-  customers    Customer[]
-  invoices     Invoice[]
-  invoiceLines InvoiceLine[]
+  id             String          @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  name           String
+  slug           String          @unique
+  createdAt      DateTime        @default(dbgenerated("clock_timestamp()")) @map("created_at") @db.Timestamptz(3)
+  memberships    Membership[]
+  customers      Customer[]
+  invoices       Invoice[]
+  invoiceLines   InvoiceLine[]
+  invoiceCounter InvoiceCounter?
 
   @@map("organizations")
 }
@@ -76,6 +77,8 @@ model Customer {
   organizationId String       @map("organization_id") @db.Uuid
   name           String
   email          String
+  // Free text printed under the name on invoices (several lines).
+  address        String?
   createdAt      DateTime     @default(dbgenerated("clock_timestamp()")) @map("created_at") @db.Timestamptz(3)
   organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade, onUpdate: NoAction)
   invoices       Invoice[]
@@ -90,10 +93,19 @@ model Invoice {
   id             String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   organizationId String        @map("organization_id") @db.Uuid
   customerId     String        @map("customer_id") @db.Uuid
-  // Assigned when a draft is finalized (D2), so the numbers customers see have no gaps.
+  // Assigned by the database when a draft is finalized (the invoices_guard trigger, from invoice_counters),
+  // so the numbers customers see have no gaps. The application can't write it.
   number         Int?
   status         InvoiceStatus @default(DRAFT)
+  // Fixed at creation: prices are in this currency's minor unit, so changing it would rescale every line.
   currency       String        @db.Char(3)
+  memo           String?
+  // Set by the trigger at finalization, never by the application: when it was issued and what it totals.
+  issuedAt       DateTime?     @map("issued_at") @db.Timestamptz(3)
+  dueOn          DateTime?     @map("due_on") @db.Date
+  subtotalMinor  BigInt?       @map("subtotal_minor")
+  taxMinor       BigInt?       @map("tax_minor")
+  totalMinor     BigInt?       @map("total_minor")
   createdAt      DateTime      @default(dbgenerated("clock_timestamp()")) @map("created_at") @db.Timestamptz(3)
   organization   Organization  @relation(fields: [organizationId], references: [id], onDelete: Cascade, onUpdate: NoAction)
   // By (organization_id, customer_id): another organization's customer can't be referenced.
@@ -119,6 +131,8 @@ model InvoiceLine {
   quantity       Decimal      @db.Decimal(12, 3)
   // Integer minor units (cents for USD); never floating point.
   unitPriceMinor BigInt       @map("unit_price_minor")
+  // A percentage with three decimals (8.875), 0 to 100.
+  taxRate        Decimal      @default(0) @map("tax_rate") @db.Decimal(6, 3)
   organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade, onUpdate: NoAction)
   invoice        Invoice      @relation(fields: [organizationId, invoiceId], references: [organizationId, id], onDelete: Cascade, onUpdate: NoAction)
 
@@ -128,4 +142,15 @@ model InvoiceLine {
   // (organization_id, invoice_id) lookups the old separate index did.
   @@unique([organizationId, invoiceId, position])
   @@map("invoice_lines")
+}
+
+// The last invoice number an organization issued. The finalizing UPDATE's trigger increments it with an
+// upsert, which locks this row until the transaction ends: finalizations in one organization take turns, and a
+// rollback hands the number back, so numbers have no gaps.
+model InvoiceCounter {
+  organizationId String       @id @map("organization_id") @db.Uuid
+  lastNumber     Int          @map("last_number")
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@map("invoice_counters")
 }

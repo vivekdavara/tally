@@ -22,7 +22,7 @@ beforeAll(async () => {
       const c = await tx.customer.create({ data: { organizationId: org.id, name: "c", email: `c-${s}@example.com` } });
       const i = await tx.invoice.create({ data: { organizationId: org.id, customerId: c.id, currency: "USD" } });
       await tx.invoiceLine.create({
-        data: { organizationId: org.id, invoiceId: i.id, position: 1, description: "x", quantity: "1.5", unitPriceMinor: 12345678901234n },
+        data: { organizationId: org.id, invoiceId: i.id, position: 1, description: "x", quantity: "1.5", unitPriceMinor: 1234567890n },
       });
       return { customerId: c.id, invoiceId: i.id };
     },
@@ -60,8 +60,8 @@ describe("withTenant's tx view", () => {
     });
     expect(out.made).toHaveLength(1);
     expect(Prisma.Decimal.isDecimal(out.agg._sum.quantity)).toBe(true);
-    expect(out.agg._sum.unitPriceMinor).toBe(12345678901234n);
-    expect(out.grouped[0]?._sum.unitPriceMinor).toBe(12345678901234n);
+    expect(out.agg._sum.unitPriceMinor).toBe(1234567890n);
+    expect(out.grouped[0]?._sum.unitPriceMinor).toBe(1234567890n);
   });
 
   it("awaiting the same promise twice runs it once; .catch/.finally chain", async () => {

@@ -3,7 +3,7 @@
 import { execFileSync } from "node:child_process";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { Db } from "@/server/db/client";
-import { appDb, ownerUrl, unique } from "../helpers";
+import { adminDb, appDb, ownerUrl, unique } from "../helpers";
 
 let app: Db;
 
@@ -86,25 +86,62 @@ describe("invoices and lines", () => {
   const invoice = (data: Partial<{ currency: string; number: number | null; status: "DRAFT" | "OPEN" | "PAID" | "VOID" }>) =>
     inTenant((tx) => tx.invoice.create({ data: { organizationId: orgId, customerId, currency: "USD", ...data } }));
 
-  it("accept a draft without a number and a finalized invoice with one", async () => {
+  it("accept a draft, which has no number", async () => {
     await expect(invoice({})).resolves.toMatchObject({ status: "DRAFT", number: null });
-    await expect(invoice({ status: "OPEN", number: 1 })).resolves.toMatchObject({ number: 1 });
   });
 
   it.each([
     ["a lower-case currency", { currency: "usd" }, /invoices_currency_format/],
     // CHAR(3) pads "US" to "US ", which the format check refuses.
     ["a two-letter currency", { currency: "US" }, /invoices_currency_format/],
-    ["a draft with a number", { number: 7 }, /invoices_number_when_final/],
-    ["an open invoice without a number", { status: "OPEN" as const }, /invoices_number_when_final/],
-    ["a zero number", { status: "PAID" as const, number: 0 }, /invoices_number_positive/],
+    // Only finalization assigns numbers (the invoices_guard trigger); the application has no grant on them.
+    ["a number chosen by the application", { number: 7 }, /permission denied for table invoices/],
+    ["a new invoice that isn't a draft", { status: "OPEN" as const }, /a new invoice must be a draft/],
   ])("refuse %s", async (_, data, constraint) => {
     await expect(invoice(data)).rejects.toThrow(constraint);
   });
 
-  it("refuse a second invoice with the same number in one organization", async () => {
-    await invoice({ status: "OPEN", number: 42 });
-    await expect(invoice({ status: "OPEN", number: 42 })).rejects.toMatchObject({ code: "P2002" });
+  describe("with the triggers switched off (a superuser), the CHECK constraints still hold", () => {
+    // session_replication_role = replica skips ordinary triggers: what's left is the constraints.
+    async function insertWithoutTriggers(rows: string[]): Promise<void> {
+      const admin = adminDb({ max: 1 });
+      try {
+        await admin.$transaction(async (tx) => {
+          await tx.$executeRawUnsafe("SET LOCAL session_replication_role = replica");
+          for (const row of rows) {
+            await tx.$executeRawUnsafe(
+              `INSERT INTO invoices (organization_id, customer_id, currency, status, number, issued_at, due_on,
+                                     subtotal_minor, tax_minor, total_minor)
+               VALUES ($1::uuid, $2::uuid, 'USD', ${row})`,
+              orgId,
+              customerId,
+            );
+          }
+          throw new Error("rolled back");
+        });
+      } finally {
+        await admin.$disconnect();
+      }
+    }
+    const final = "now(), current_date, 100, 0, 100";
+
+    it.each([
+      ["a draft with a number", `'DRAFT', 7, NULL, NULL, NULL, NULL, NULL`, /invoices_number_when_final/],
+      ["an open invoice without a number", `'OPEN', NULL, ${final}`, /invoices_number_when_final/],
+      ["a zero number", `'PAID', 0, ${final}`, /invoices_number_positive/],
+      ["an open invoice without totals", `'OPEN', 1, now(), current_date, NULL, NULL, NULL`, /invoices_final_fields/],
+      ["a draft with totals", `'DRAFT', NULL, NULL, NULL, 1, 0, 1`, /invoices_final_fields/],
+      ["a total that doesn't add up", `'OPEN', 1, now(), current_date, 100, 10, 111`, /invoices_total_adds_up/],
+    ])("refuse %s", async (_, row, constraint) => {
+      await expect(insertWithoutTriggers([row])).rejects.toThrow(constraint);
+    });
+
+    it("refuse a second invoice with the same number in one organization", async () => {
+      const row = `'OPEN', 42, ${final}`;
+      await expect(insertWithoutTriggers([row, row])).rejects.toThrow(/invoices_organization_id_number_key/);
+      // The control: one such row is fine (and rolled back).
+      await expect(insertWithoutTriggers([row])).rejects.toThrow(/rolled back/);
+    });
   });
 
   describe("lines", () => {
@@ -114,7 +151,7 @@ describe("invoices and lines", () => {
       invoiceId = (await invoice({})).id;
     });
 
-    const line = (data: Partial<{ position: number; quantity: string; unitPriceMinor: bigint }>) =>
+    const line = (data: Partial<{ position: number; quantity: string; unitPriceMinor: bigint; taxRate: string }>) =>
       inTenant((tx) =>
         tx.invoiceLine.create({
           data: { organizationId: orgId, invoiceId, position: 1, description: "Work", quantity: "1", unitPriceMinor: 100n, ...data },
@@ -122,10 +159,10 @@ describe("invoices and lines", () => {
       );
 
     it("keep exact decimal quantities and integer minor units", async () => {
-      const created = await line({ position: 1, quantity: "2.125", unitPriceMinor: 9_007_199_254_740_993n });
+      const created = await line({ position: 1, quantity: "2.125", unitPriceMinor: 10_000_000_000n, taxRate: "8.875" });
       expect(created.quantity.toString()).toBe("2.125");
-      // Beyond Number.MAX_SAFE_INTEGER: a bigint survives the round trip exactly.
-      expect(created.unitPriceMinor).toBe(9_007_199_254_740_993n);
+      expect(created.unitPriceMinor).toBe(10_000_000_000n);
+      expect(created.taxRate.toFixed(3)).toBe("8.875");
     });
 
     it.each([
@@ -133,6 +170,11 @@ describe("invoices and lines", () => {
       ["a negative quantity", { position: 3, quantity: "-1" }, /invoice_lines_quantity_positive/],
       ["a negative price", { position: 4, unitPriceMinor: -1n }, /invoice_lines_unit_price_nonnegative/],
       ["position zero", { position: 0 }, /invoice_lines_position_positive/],
+      // The limits money.ts also checks, so the largest invoice fits in bigint (DESIGN.md, "Money").
+      ["a price over 10^10 minor units", { position: 5, unitPriceMinor: 10_000_000_001n }, /invoice_lines_unit_price_max/],
+      ["a quantity over 1,000,000", { position: 6, quantity: "1000000.001" }, /invoice_lines_quantity_max/],
+      ["a tax rate over 100%", { position: 7, taxRate: "100.001" }, /invoice_lines_tax_rate_range/],
+      ["a negative tax rate", { position: 8, taxRate: "-1" }, /invoice_lines_tax_rate_range/],
     ])("refuse %s", async (_, data, constraint) => {
       await expect(line(data)).rejects.toThrow(constraint);
     });

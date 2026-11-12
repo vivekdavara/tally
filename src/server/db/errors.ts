@@ -14,3 +14,16 @@ export function violatedUniqueConstraint(error: unknown): string | undefined {
   const index = cause?.constraint?.index;
   return typeof index === "string" ? index : undefined;
 }
+
+/**
+ * The SQLSTATE of the database error behind a Prisma error, or undefined. The invoices_guard and
+ * invoice_lines_guard triggers raise their own codes (TL001-TL009, migrations/*_invoicing), which is how the
+ * services tell "this invoice is final" from a bug.
+ */
+export function sqlState(error: unknown): string | undefined {
+  if (!(error instanceof Prisma.PrismaClientKnownRequestError)) {
+    return undefined;
+  }
+  const cause = (error.meta?.driverAdapterError as { cause?: { code?: unknown } } | undefined)?.cause;
+  return typeof cause?.code === "string" ? cause.code : undefined;
+}

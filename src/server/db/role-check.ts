@@ -2,7 +2,15 @@ import type { Db } from "./client";
 import { TENANT_TABLES } from "./tenant";
 
 /** Every table the application uses. */
-export const APP_TABLES = ["users", "organizations", "memberships", "customers", "invoices", "invoice_lines"] as const;
+export const APP_TABLES = [
+  "users",
+  "organizations",
+  "memberships",
+  "customers",
+  "invoices",
+  "invoice_lines",
+  "invoice_counters",
+] as const;
 
 /** Tables under row-level security: the tenant tables, and memberships (writes only). */
 export const RLS_TABLES = [...TENANT_TABLES, "memberships"] as const;
@@ -40,8 +48,8 @@ export const FORBIDDEN: { table: string; privilege: string; column?: string }[] 
     { table, privilege: "REFERENCES" },
     { table, privilege: "TRIGGER" },
   ]),
-  // memberships has no id: its key is (organization_id, user_id), covered by the organization_id rule.
-  ...APP_TABLES.filter((t) => t !== "memberships").flatMap((table) => [
+  // memberships and invoice_counters have no id: their keys start with organization_id, covered below.
+  ...APP_TABLES.filter((t) => t !== "memberships" && t !== "invoice_counters").flatMap((table) => [
     { table, privilege: "INSERT", column: "id" },
     { table, privilege: "UPDATE", column: "id" },
   ]),
@@ -53,6 +61,16 @@ export const FORBIDDEN: { table: string; privilege: string; column?: string }[] 
   { table: "users", privilege: "UPDATE", column: "*" },
   { table: "organizations", privilege: "UPDATE", column: "*" },
   ...RLS_TABLES.map((table) => ({ table, privilege: "UPDATE", column: "organization_id" })),
+  // Invoices (migrations/*_invoicing): the number, issue time and totals are written only by the
+  // invoices_guard trigger at finalization; a number the application chose could skip or repeat, a total it
+  // wrote could disagree with the lines. The currency is fixed at creation (prices are in its minor unit).
+  ...["number", "issued_at", "subtotal_minor", "tax_minor", "total_minor"].flatMap((column) => [
+    { table: "invoices", privilege: "INSERT", column },
+    { table: "invoices", privilege: "UPDATE", column },
+  ]),
+  { table: "invoices", privilege: "UPDATE", column: "currency" },
+  // Deleting the counter would restart numbering at 1.
+  { table: "invoice_counters", privilege: "DELETE" },
 ];
 
 export interface RoleFacts {
