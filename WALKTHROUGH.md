@@ -290,6 +290,14 @@ Two more were latent behind grants the app doesn't have (a temp table shadowing 
 out of a final invoice), fixed anyway and added to the startup role check, so a database set up differently fails
 loudly. And the PDF writer drew text off the page for inputs the validation allows (`tests/review-d2/`).
 
+**And round 2, on round 1's fixes?**
+Seven bugs, five in or beside round 1's fixes, as on earlier projects: sizing PDF columns to the widest amount could
+squeeze a description into more lines than a page; measuring every non-ASCII character as a digit; INR's ₹ printing
+"?"; a decomposed accent cut from its letter; the role check missing `session_replication_role = replica` (no trigger
+fires at all) and calling an `ENABLE ALWAYS` trigger missing; and an organization delete that worked only because of
+the order Postgres fires cascades in. Each is a test in `tests/review-d2r2/`. The lesson I take: a fix is new code
+and needs its own review.
+
 **Why not make the counter function `SECURITY DEFINER`, so the app needs no grant on the counter at all?**
 A definer function runs with its owner's privileges: on these tables that's everything, far beyond the column grants
 the application is held to, so any bug in such a function (or in how it resolves names) is a hole the grants no longer

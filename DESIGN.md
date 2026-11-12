@@ -296,8 +296,15 @@ The functions are `SECURITY INVOKER` with `SET search_path = pg_catalog, public,
 session's temporary schema *first* for tables unless `pg_temp` is listed, so with the first version's `pg_catalog,
 public`, a session allowed to create temporary tables could shadow `invoice_lines` and make finalization total a fake
 line (review round 1, shown with a `TEMP` grant the application doesn't have). Listed last, it's searched last. The
-role check refuses `TEMP` and `CREATE` on the database and `CREATE` on schema `public`, and requires the three guard
-triggers to exist and fire for ordinary sessions.
+role check refuses `TEMP` and `CREATE` on the database and `CREATE` on schema `public`, requires the three guard
+triggers to exist and fire for ordinary sessions (enabled `O` or `A`), and refuses a connection whose
+`session_replication_role` isn't `origin`: under `replica` no ordinary trigger fires, not the guards and not the
+foreign keys' own triggers either (review round 2).
+
+Both guards let an organization's own deletion cascade through (a final invoice can't otherwise be deleted, nor its
+lines changed). Each checks the organization row is gone, rather than relying on which cascade Postgres fires first:
+it fires them in trigger-name order, which follows foreign-key creation order, and round 2 showed the delete failing
+once the invoices' foreign key was re-created.
 
 ### Numbering: gapless, per organization
 
@@ -353,8 +360,10 @@ services take the same lock first (`lockInvoice`), which also makes their "next 
 built-in Helvetica covers without embedding a font, and under 300 lines with no dependency are easier to test byte for byte
 than a library. Text is encoded as Windows-1252 (WinAnsiEncoding), so Latin text, €, dashes and curly quotes print;
 other scripts print as "?" (supporting them means embedding a TrueType subset, which is when a library like pdf-lib
-earns its place). Right alignment uses Helvetica's AFM widths. Long descriptions wrap; long invoices break across
-pages with the table header repeated, and the totals block checks for room row by row (up to 100 tax rates is longer
+earns its place). A currency symbol outside Windows-1252 (₹) would be the app's own "?", so amounts fall back to the
+ISO code ("INR 53.42") in the PDF only. Measuring uses Helvetica's AFM widths for every character the encoding has
+(accented letters through their base letter); text is wrapped as its NFC form, by grapheme cluster. Long descriptions wrap (and one taller than a page continues on the
+next); long invoices break across pages with the table header repeated, and the totals block checks for room row by row (up to 100 tax rates is longer
 than a page); the bill-to block wraps to its column and is capped (3 lines of name, 2 of email, the 6 lines an address
 may have); columns are sized to their widest cell, so even the largest amounts the limits allow don't overlap (an
 ordinary invoice keeps the default widths); drafts say they're drafts on every page. The output is deterministic. The route
