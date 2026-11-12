@@ -316,7 +316,8 @@ export const TRIGGER_REASONS: Record<string, string> = {
   TL007: "not-open",
   TL008: "final",
   TL009: "too-many-lines",
-  TL010: "numbering",
+  // TL010 (invoice_counters_guard) is deliberately not here: only a bug or an attack reaches it, so it stays an
+  // error, logged, rather than a message (review round 2).
 };
 
 /**

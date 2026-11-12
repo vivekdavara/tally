@@ -15,6 +15,7 @@ const safe: RoleFacts = {
   presetTenant: null,
   creationPrivileges: [],
   missingTriggers: [],
+  replicationRole: null,
 };
 
 describe("roleProblems", () => {

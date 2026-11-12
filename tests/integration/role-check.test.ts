@@ -51,6 +51,7 @@ describe("the role check against Postgres", () => {
       presetTenant: null,
       creationPrivileges: [],
       missingTriggers: [],
+      replicationRole: null,
     });
     await expect(assertSafeAppRole(app)).resolves.toBeUndefined();
   });

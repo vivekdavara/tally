@@ -77,8 +77,8 @@ export const FORBIDDEN: { table: string; privilege: string; column?: string }[] 
 
 /**
  * The triggers that enforce the invoice life cycle and numbering (migrations/*_invoicing, *_review_d2). Each must
- * exist and fire for ordinary sessions (tgenabled 'O'); one disabled or dropped would let any writer break the
- * numbering or change a final invoice.
+ * exist and fire for ordinary sessions (tgenabled 'O', or 'A' for always); one disabled, dropped or set to fire
+ * only for replicas would let any writer break the numbering or change a final invoice.
  */
 export const EXPECTED_TRIGGERS: { table: string; name: string }[] = [
   { table: "invoices", name: "invoices_guard" },
@@ -117,6 +117,12 @@ export interface RoleFacts {
   creationPrivileges: string[];
   /** EXPECTED_TRIGGERS that are missing or not firing for ordinary sessions. */
   missingTriggers: string[];
+  /**
+   * session_replication_role when it isn't 'origin'. Under 'replica' ordinary triggers don't fire, and that
+   * includes the guards and the foreign keys' own triggers (review round 2 of day 2): a role default
+   * (ALTER ROLE ... SET) is the usual way to get there.
+   */
+  replicationRole: string | null;
 }
 
 /**
@@ -154,6 +160,9 @@ export function roleProblems(facts: RoleFacts): string[] {
   }
   if (facts.missingTriggers.length > 0) {
     problems.push(`invoice triggers missing or disabled: ${facts.missingTriggers.join(", ")}`);
+  }
+  if (facts.replicationRole) {
+    problems.push(`session_replication_role is ${facts.replicationRole}, so no trigger (guards, foreign keys) fires`);
   }
   return problems;
 }
@@ -198,6 +207,7 @@ export async function readRoleFacts(client: Pick<Db, "$queryRaw">): Promise<Role
       preset: string | null;
       creation: string[];
       missing_triggers: string[];
+      replication_role: string | null;
     }[]
   >`
     SELECT r.rolname::text AS role,
@@ -240,8 +250,9 @@ export async function readRoleFacts(client: Pick<Db, "$queryRaw">): Promise<Role
                  WHERE NOT EXISTS (SELECT 1 FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid
                                    JOIN pg_namespace n ON n.oid = c.relnamespace
                                    WHERE n.nspname = 'public' AND c.relname = e.tbl AND t.tgname = e.name
-                                     AND t.tgenabled = 'O')
-                 ORDER BY 1) AS missing_triggers
+                                     AND t.tgenabled IN ('O', 'A'))
+                 ORDER BY 1) AS missing_triggers,
+           NULLIF(current_setting('session_replication_role'), 'origin') AS replication_role
     FROM pg_roles r
     WHERE r.rolname = current_user`;
   const row = rows[0];
@@ -276,6 +287,7 @@ export async function readRoleFacts(client: Pick<Db, "$queryRaw">): Promise<Role
     presetTenant: row.preset,
     creationPrivileges: row.creation,
     missingTriggers: row.missing_triggers,
+    replicationRole: row.replication_role,
   };
 }
 
