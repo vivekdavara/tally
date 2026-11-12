@@ -88,3 +88,72 @@ input {
 .muted {
   color: var(--muted);
 }
+
+.wide {
+  max-width: 56rem;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+th,
+td {
+  padding: 0.375rem 0.5rem;
+  border-bottom: 1px solid var(--line);
+  text-align: left;
+  vertical-align: top;
+}
+
+.num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+tfoot td {
+  border-bottom: none;
+}
+
+tr.total td {
+  font-weight: 700;
+  border-top: 2px solid var(--fg);
+}
+
+select,
+textarea {
+  display: block;
+  width: 100%;
+  margin-top: 0.25rem;
+  padding: 0.5rem;
+  border: 1px solid var(--line);
+  border-radius: 0.375rem;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+}
+
+button.danger {
+  border-color: var(--danger);
+  background: transparent;
+  color: var(--danger);
+}
+
+form.inline button {
+  padding: 0.125rem 0.5rem;
+  font-size: 0.875rem;
+}
+
+.badge {
+  font-size: 0.875rem;
+  font-weight: 600;
+  padding: 0.125rem 0.5rem;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  vertical-align: middle;
+}
+
+.memo {
+  white-space: pre-line;
+}

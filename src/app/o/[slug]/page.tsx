@@ -29,6 +29,10 @@ export default async function OrganizationPage({ params }: { params: Promise<{ s
           <dd data-testid="invoice-count">{counts.invoices}</dd>
         </div>
       </dl>
+      <p className="row">
+        <Link href={`/o/${slug}/customers`}>Customers</Link>
+        <Link href={`/o/${slug}/invoices`}>Invoices</Link>
+      </p>
       <SignOutButton />
     </section>
   );
