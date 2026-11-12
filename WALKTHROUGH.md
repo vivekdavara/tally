@@ -1,7 +1,8 @@
 # Walkthrough: questions about Tally, answered from the code
 
-Day 1 covers the foundation: tenant isolation, the schema, roles, authentication. Later days add invoices, billing,
-roles and the full isolation suite, and this file grows with them.
+Day 1 covers the foundation: tenant isolation, the schema, roles, authentication. Day 2 adds invoices: exact money,
+gapless numbering, the life cycle in the database, PDFs. Later days add billing, roles and the full isolation suite,
+and this file grows with them.
 
 ## The design
 
@@ -202,9 +203,92 @@ session that had set its role, `UPDATE` on users, a `SECURITY DEFINER` function,
 `pg_write_all_data` (invisible because the role is `NOINHERIT`); and RFC 7914's `N < 2^(16 r)` rule. As on earlier
 projects, each round found bugs in the previous round's fixes.
 
+## Invoices (day 2)
+
+**How do you represent money?**
+As `bigint` counts of the currency's minor unit: $12.34 is `1234n`, ¥1,200 is `1200n`, 1.234 KWD is `1234n`
+(`src/server/invoices/money.ts`, `CURRENCIES` holds each currency's ISO 4217 digits). Quantities and tax rates are
+`bigint` thousandths (`numeric(12,3)` and `numeric(6,3)` in Postgres). No JavaScript `number` is ever involved, so
+nothing is rounded by floating point; even display goes through `Intl.NumberFormat` with a decimal *string*, which it
+formats exactly (`prints every digit of amounts far beyond a double's 2^53` in `tests/unit/money.test.ts`).
+
+**What's your rounding rule, and why that one?**
+Each line rounds half up to the minor unit; tax is computed once per tax rate on the sum of that rate's lines, rounded
+half up; the total is the sum, with no further rounding (`computeTotals`). Per rate rather than per line keeps the tax
+within half a cent of exact for each rate however many lines share it: three $0.10 lines at 5% owe 1.5 cents; per line
+you'd charge 3 cents, per rate 2 (`taxes once per rate` in the money tests). And input is never rounded at all:
+"12.345" dollars is refused, because silently storing 12.35 would charge something nobody typed.
+
+**Why are the totals computed twice, in SQL and in TypeScript?**
+The stored totals (what an open invoice is worth, what billing will charge) are written by the database's
+finalization trigger, so the application can't write a wrong one: it has no privilege on those columns. The pages and
+PDFs need per-line amounts and tax rows, which money.ts computes. Two implementations of one rule can drift, so
+`tests/integration/totals-differential.test.ts` runs both on 600 random invoices (exact halves, the limits, mixed
+rates) and requires identical answers; and `getInvoice` throws rather than show an invoice whose stored and computed
+totals differ.
+
+**How do you get invoice numbers with no gaps?**
+A counter row per organization, `invoice_counters`, incremented by an upsert inside the finalizing transaction
+(`invoices_guard` in `prisma/migrations/*_invoicing`). The upsert locks the row until commit, so concurrent
+finalizations in one organization take turns, and a rollback undoes the increment, so the next finalization reuses the
+number. `leaves no gaps and no repeats with 40 concurrent finalizations, a quarter of them rolled back` in
+`tests/integration/invoices.test.ts` checks exactly 1..30 come out.
+
+**Why not a Postgres sequence?**
+Sequences are deliberately non-transactional: `nextval` never rolls back, so every failed or aborted finalization
+would burn a number and leave a gap. That's fine for ids, wrong for invoice numbers, which tax rules in many countries
+expect to run in sequence without gaps.
+
+**What does the lock cost?**
+Measured (`npm run bench:finalize`, README "Results (day 2)"): with 16 concurrent finalizations in one organization,
+p95 22.6 ms and 2,033/s, against 7.3 ms and 3,076/s when the same 16 workers finalize in 16 different organizations.
+The lock only serializes one organization against itself, and only from the upsert to `COMMIT`.
+
+**Why is the issue time taken after the number?**
+So issue times can't run backwards against numbers. The counter lock means #N's transaction has committed before #N+1
+gets its number; a timestamp taken after the number is therefore later than #N's. My first version took the time
+before the upsert, and the 40-finalization test caught #N+1 stamped a millisecond earlier than #N.
+
+**Why enforce the life cycle in triggers instead of in the service?**
+The service checks first, for clear messages, but tenant isolation already taught that "every caller remembers" is
+the weak point. The triggers hold for any writer (a bug, a script, raw SQL): a new invoice is a draft; only drafts
+can be deleted; once final, nothing but the status changes, only OPEN → PAID or VOID; lines change only on drafts.
+`a final invoice > refuses to ...` in the invoice tests issues each forbidden write as raw SQL and shows the trigger's
+refusal.
+
+**What stops a line being added while the invoice is being finalized?**
+A lock. The lines trigger takes `FOR NO KEY UPDATE` on the line's invoice, which conflicts with the finalizing
+`UPDATE`'s row lock. Either the line commits first and the finalization's totals include it, or the finalization
+commits first and the line insert, once it gets the lock, sees an OPEN invoice and is refused. `a line write racing a
+finalization` holds a finalization open, shows the insert waiting in `pg_stat_activity`, then commits and checks the
+insert was refused and the totals didn't change. It's `NO KEY` so it doesn't conflict with the foreign-key check's
+`FOR KEY SHARE`.
+
+**Doesn't the counter table open a new cross-tenant channel?**
+Its key is `organization_id` alone, and the row-level security policy's `WITH CHECK` only lets a transaction insert
+its own organization's row, so the upsert's unique check can only ever collide with the tenant's own counter. The
+application has no `DELETE` on it (that would restart numbering) and can't change its `organization_id`; the role
+check refuses both.
+
+**Why write your own PDF generator?**
+An invoice is text, lines and page breaks, which PDF's built-in Helvetica covers without embedding a font, so the
+writer is under 300 lines with no dependency (`src/server/invoices/pdf.ts`), its output deterministic, and the tests
+check the file byte for byte (every xref offset points at its object; every stream length is exact). The trade-off is
+the encoding: standard fonts use Windows-1252, so Latin text, € and dashes work and other scripts print "?". Supporting
+them means embedding a TrueType subset, which is when a library like pdf-lib earns its place.
+
+**How do you know the PDF looks right?**
+`scripts/sample-pdf.ts` writes sample invoices; I rendered them to PNG with pypdfium2 and looked, and extracted the
+text with pdfplumber, whose metrics showed every right-aligned line ending within 0.05 pt of the margin, after I
+added Helvetica-Bold's widths (the bold "Amount" header overran by a few points when measured with regular widths).
+
 ## What I'd do next, or differently at scale
 
 - Rate-limit sign-in (day 4), and email verification to stop sign-up from revealing accounts.
+- Credit notes rather than editing a final invoice: a negative document that references the original, numbered in
+  the same sequence; and an embedded font for PDFs in non-Latin scripts.
+- If one organization ever finalized hundreds of invoices a second, number them in a batch (one counter update for
+  many invoices) rather than giving up gaplessness.
 - Put RLS on `memberships` too, keyed by a transaction-local user id, so the membership lookup is also enforced by
   the database.
 - At scale: the three extra round trips per request could be removed by sending `BEGIN; set_config; ...` as one
