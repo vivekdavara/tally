@@ -27,3 +27,18 @@ export function sqlState(error: unknown): string | undefined {
   const cause = (error.meta?.driverAdapterError as { cause?: { code?: unknown } } | undefined)?.cause;
   return typeof cause?.code === "string" ? cause.code : undefined;
 }
+
+/**
+ * The name of the foreign key a write violated, or undefined (P2003; same place as a unique violation's name).
+ * A foreign-key check runs without row security, but every tenant table's keys start with organization_id, so a
+ * violation only ever concerns the tenant's own rows (DESIGN.md, "Composite foreign keys").
+ */
+export function violatedForeignKey(error: unknown): string | undefined {
+  if (!(error instanceof Prisma.PrismaClientKnownRequestError) || error.code !== "P2003") {
+    return undefined;
+  }
+  const cause = (error.meta?.driverAdapterError as { cause?: { constraint?: { index?: unknown } } } | undefined)
+    ?.cause;
+  const index = cause?.constraint?.index;
+  return typeof index === "string" ? index : undefined;
+}

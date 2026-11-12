@@ -15,9 +15,11 @@ import {
   finalize,
   getInvoice,
   listInvoices,
+  CUSTOMER_GONE,
+  CUSTOMER_HAS_INVOICES,
+  getCustomer,
   markPaid,
   refusals,
-  getCustomer,
   removeLine,
   TotalsMismatchError,
   updateCustomer,
@@ -419,5 +421,46 @@ describe("a final invoice's bill-to details", () => {
     await expect(org.run((tx) => tx.$executeRaw`UPDATE invoices SET bill_to_name = 'Someone else' WHERE id = ${id}::uuid`)).rejects.toThrow(/permission denied/);
     // Even a superuser (all privileges, no row-level security) meets the trigger.
     await expect(admin.$executeRaw`UPDATE invoices SET bill_to_address = 'Elsewhere' WHERE id = ${id}::uuid`).rejects.toThrow(/TL006|only its status can change/);
+  });
+});
+
+describe("a customer deleted while a draft is being created for them", () => {
+  it("gives the draft 'no-customer', not an error, and the delete goes through", async () => {
+    const org = await newOrg();
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    let deleted!: () => void;
+    const didDelete = new Promise<void>((resolve) => (deleted = resolve));
+    const deleting = org.run(async (tx) => {
+      const result = await deleteCustomer(tx, org.customerId);
+      deleted();
+      await gate;
+      return result;
+    });
+    await didDelete;
+    // The draft's own check still sees the customer (the delete hasn't committed); its foreign-key check then
+    // waits on the deleted row, and fails once the delete commits.
+    const creating = refusals(() => org.run((tx) => createDraft(tx, { customerId: org.customerId, currency: "USD", memo: null })), CUSTOMER_GONE);
+    let blocked = 0n;
+    for (let i = 0; i < 100 && blocked === 0n; i++) {
+      const waiting = await admin.$queryRaw<{ n: bigint }[]>`SELECT count(*) AS n FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND query LIKE 'INSERT INTO "public"."invoices"%'`;
+      blocked = waiting[0]?.n ?? 0n;
+      if (blocked === 0n) await new Promise((r) => setTimeout(r, 10));
+    }
+    expect(blocked).toBe(1n);
+    release();
+    expect(await deleting).toEqual({ ok: true, value: undefined });
+    expect(await creating).toEqual({ ok: false, reason: "no-customer" });
+  });
+
+  it("maps the same key to 'has-invoices' for a delete that skips the service's count", async () => {
+    const org = await newOrg();
+    await draftWithLines(org);
+    expect(
+      await refusals(async () => {
+        await org.run((tx) => tx.customer.deleteMany({ where: { id: org.customerId } }));
+        return { ok: true as const, value: undefined };
+      }, CUSTOMER_HAS_INVOICES),
+    ).toEqual({ ok: false, reason: "has-invoices" });
   });
 });

@@ -1,5 +1,5 @@
 import type { Prisma } from "@/generated/prisma/client";
-import { sqlState, violatedUniqueConstraint } from "@/server/db/errors";
+import { sqlState, violatedForeignKey, violatedUniqueConstraint } from "@/server/db/errors";
 import type { TenantTx } from "@/server/db/tenant";
 import { computeTotals, MAX_LINES, type Currency, type Totals } from "./money";
 import type { CustomerInput, DraftInput, DraftUpdateInput, ParsedLine } from "./schemas";
@@ -325,13 +325,25 @@ export const TRIGGER_REASONS: Record<string, string> = {
  * withTenant must see the error to roll back. A function that caught it inside the transaction and returned
  * would fail at COMMIT instead (withTenant's SELECT 1, by design): the first version of createCustomer did
  * that, and a duplicate email was a 500.
+ *
+ * `foreignKeys` names what a foreign-key violation means for this call, since one key can mean different
+ * things: invoices' key to customers is "has-invoices" when deleting a customer and "no-customer" when
+ * creating a draft (each a race the services' own checks can't close: a delete committed between the check and
+ * the write).
  */
-export async function refusals<T>(fn: () => Promise<Result<T>>): Promise<Result<T>> {
+export async function refusals<T>(fn: () => Promise<Result<T>>, foreignKeys: Record<string, string> = {}): Promise<Result<T>> {
   try {
     return await fn();
   } catch (error) {
-    const reason = TRIGGER_REASONS[sqlState(error) ?? ""] ?? UNIQUE_REASONS[violatedUniqueConstraint(error) ?? ""];
+    const reason =
+      TRIGGER_REASONS[sqlState(error) ?? ""] ??
+      UNIQUE_REASONS[violatedUniqueConstraint(error) ?? ""] ??
+      foreignKeys[violatedForeignKey(error) ?? ""];
     if (reason) return fail(reason);
     throw error;
   }
 }
+
+/** For refusals(): what the invoices → customers foreign key means when it refuses each kind of write. */
+export const CUSTOMER_HAS_INVOICES = { invoices_organization_id_customer_id_fkey: "has-invoices" };
+export const CUSTOMER_GONE = { invoices_organization_id_customer_id_fkey: "no-customer" };

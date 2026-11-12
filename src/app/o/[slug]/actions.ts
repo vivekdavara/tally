@@ -7,6 +7,8 @@ import { requireTenant } from "@/server/dal";
 import { customerInput, draftInput, draftUpdateInput, finalizeInput, parseLine } from "@/server/invoices/schemas";
 import {
   addLine,
+  CUSTOMER_GONE,
+  CUSTOMER_HAS_INVOICES,
   createCustomer,
   createDraft,
   deleteCustomer,
@@ -74,7 +76,7 @@ export async function updateCustomerAction(slug: string, id: string, _state: For
 
 export async function deleteCustomerAction(slug: string, id: string): Promise<FormState> {
   const { run } = await requireTenant(slug);
-  const result = await run((tx) => deleteCustomer(tx, id));
+  const result = await refusals(() => run((tx) => deleteCustomer(tx, id)), CUSTOMER_HAS_INVOICES);
   if (!result.ok) return message(result);
   redirect(`/o/${slug}/customers`);
 }
@@ -86,7 +88,7 @@ export async function createDraftAction(slug: string, _state: FormState, formDat
   const parsed = draftInput.safeParse(values);
   if (!parsed.success) return { fieldErrors: z.flattenError(parsed.error).fieldErrors, values };
   const { run } = await requireTenant(slug);
-  const result = await run((tx) => createDraft(tx, parsed.data));
+  const result = await refusals(() => run((tx) => createDraft(tx, parsed.data)), CUSTOMER_GONE);
   if (!result.ok) return { ...message(result), values };
   redirect(invoicePath(slug, result.value));
 }
@@ -96,7 +98,7 @@ export async function updateDraftAction(slug: string, id: string, _state: FormSt
   const parsed = draftUpdateInput.safeParse(values);
   if (!parsed.success) return { fieldErrors: z.flattenError(parsed.error).fieldErrors, values };
   const { run } = await requireTenant(slug);
-  const result = await refusals(() => run((tx) => updateDraft(tx, id, parsed.data)));
+  const result = await refusals(() => run((tx) => updateDraft(tx, id, parsed.data)), CUSTOMER_GONE);
   if (!result.ok) return { ...message(result), values };
   revalidatePath(invoicePath(slug, id));
   return {};
