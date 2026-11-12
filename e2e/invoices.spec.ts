@@ -125,3 +125,58 @@ test("another organization's invoice and customer are 404s, like missing ones", 
   expect(signedOut.status()).toBe(307);
   expect(signedOut.headers()["location"]).toMatch(/\/signin$/);
 });
+
+test("customers: a duplicate email is a message, edits keep issued invoices as issued, and deletes are guarded", async ({ page }) => {
+  const orgPath = await signUp(page, person());
+  const invoicePath = await newInvoice(page, orgPath);
+
+  // The same email again (in another case): refused with a message, the typed values kept.
+  await page.goto(`${orgPath}/customers`);
+  const form = page.getByTestId("new-customer");
+  await form.getByLabel("Name").fill("Navy Yard again");
+  await form.getByLabel("Email").fill("PAYABLES@navy.example");
+  await form.getByRole("button", { name: "Add customer" }).click();
+  await expect(form.getByRole("alert")).toHaveText("A customer with this email already exists.");
+  await expect(form.getByLabel("Name")).toHaveValue("Navy Yard again");
+
+  // Finalize the invoice, then rename the customer: the invoice still shows the name it was issued to.
+  await page.goto(invoicePath);
+  await addLine(page, { description: "Survey", quantity: "1", unitPrice: "100", taxRate: "0" });
+  await page.getByTestId("finalize").getByRole("button", { name: "Finalize invoice" }).click();
+  await expect(page.getByTestId("invoice-title")).toContainText("INV-0001");
+  await page.goto(`${orgPath}/customers`);
+  await page.getByTestId("customers").getByRole("link", { name: "Navy Yard" }).click();
+  const edit = page.getByTestId("edit-customer");
+  await edit.getByLabel("Name").fill("Navy Yard (renamed)");
+  await edit.getByRole("button", { name: "Save" }).click();
+  await expect(page.getByTestId("customers").getByRole("link", { name: "Navy Yard (renamed)" })).toBeVisible();
+  await page.goto(invoicePath);
+  await expect(page.getByText("To Navy Yard (", { exact: false })).toContainText("To Navy Yard (payables@navy.example)");
+
+  // A customer with invoices can't be deleted; void the invoice and it still can't (voided invoices stay).
+  await page.goto(`${orgPath}/customers`);
+  await page.getByTestId("customers").getByRole("link", { name: "Navy Yard (renamed)" }).click();
+  await page.getByTestId("delete-customer").getByRole("button", { name: "Delete customer" }).click();
+  await expect(page.getByTestId("delete-customer").getByRole("alert")).toHaveText("This customer has invoices, so it can't be deleted.");
+  await page.goto(invoicePath);
+  await page.getByTestId("void").getByRole("button", { name: "Void invoice" }).click();
+  await expect(page.getByTestId("invoice-title")).toContainText("Void");
+  await expect(page.getByTestId("mark-paid")).toHaveCount(0);
+});
+
+test("a draft can be deleted; its number is never used", async ({ page }) => {
+  const orgPath = await signUp(page, person());
+  const first = await newInvoice(page, orgPath);
+  await page.goto(first);
+  await page.getByTestId("delete-draft").getByRole("button", { name: "Delete draft" }).click();
+  await expect(page).toHaveURL(new RegExp(`${orgPath}/invoices$`));
+  await expect(page.getByText("No invoices yet.")).toBeVisible();
+  expect((await page.goto(first))?.status()).toBe(404);
+  // The next invoice finalized is still INV-0001: drafts never had a number to lose.
+  await page.goto(`${orgPath}/invoices`);
+  await page.getByTestId("new-invoice").getByRole("button", { name: "Create draft" }).click();
+  await addLine(page, { description: "Work", quantity: "2", unitPrice: "50", taxRate: "10" });
+  await expect(page.getByTestId("total")).toHaveText("$110.00");
+  await page.getByTestId("finalize").getByRole("button", { name: "Finalize invoice" }).click();
+  await expect(page.getByTestId("invoice-title")).toContainText("INV-0001");
+});
