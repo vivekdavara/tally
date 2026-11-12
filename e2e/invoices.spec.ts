@@ -70,6 +70,17 @@ test("a draft with lines is finalized to INV-0001 with exact totals, then paid",
   await expect(page.getByTestId("total")).toHaveText("$53.42");
   await expect(page.getByTestId("add-line")).toHaveCount(0);
 
+  // The PDF, with the session's cookies: the number and the same exact total.
+  const pdf = await page.request.get((await page.getByTestId("pdf-link").getAttribute("href"))!);
+  expect(pdf.status()).toBe(200);
+  expect(pdf.headers()["content-type"]).toBe("application/pdf");
+  expect(pdf.headers()["content-disposition"]).toBe('inline; filename="INV-0001.pdf"');
+  expect(pdf.headers()["cache-control"]).toBe("private, no-store");
+  const bytes = (await pdf.body()).toString("latin1");
+  expect(bytes.startsWith("%PDF-1.4")).toBe(true);
+  expect(bytes).toContain("(INV-0001) Tj");
+  expect(bytes).toContain("($53.42) Tj");
+
   await page.getByTestId("mark-paid").getByRole("button", { name: "Mark paid" }).click();
   await expect(page.getByTestId("invoice-title")).toContainText("Paid");
 
@@ -103,6 +114,14 @@ test("another organization's invoice and customer are 404s, like missing ones", 
     const response = await other.goto(path);
     expect(response?.status(), path).toBe(404);
   }
+  // The PDF route too: the other organization's slug with this invoice's id, and this organization's own.
+  expect((await other.request.get(`${otherOrg}/invoices/${invoiceId}/pdf`)).status()).toBe(404);
+  expect((await other.request.get(`${invoicePath}/pdf`)).status()).toBe(404);
   // And the owner's URLs: not a member, so a 404 before any query.
   expect((await other.goto(invoicePath))?.status()).toBe(404);
+  // Signed out, the PDF route sends you to sign in rather than serving anything.
+  const anonymous = await browser.newContext().then((c) => c.newPage());
+  const signedOut = await anonymous.request.get(`${invoicePath}/pdf`, { maxRedirects: 0 });
+  expect(signedOut.status()).toBe(307);
+  expect(signedOut.headers()["location"]).toMatch(/\/signin$/);
 });
