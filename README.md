@@ -147,8 +147,8 @@ AC, with a review agent running tests on the same machine (load average 4.7 to 5
   growing; across organizations nothing waits. A repeat run right after gave the same shape (16 workers: p95 24.46 ms
   vs 7.53 ms, 1,710 vs 2,882/s), and so did the first run, on battery before the counter guard and the bill-to copy
   were added (22.57 ms vs 7.29 ms, 2,033 vs 3,076/s). With one worker nothing waits, so the two 1-worker rows measure
-  the same path; their gap, and the drift between runs (579 to 1,181/s), is machine noise: the cases run one after
-  another, not interleaved, on a loaded laptop. 16 simultaneous finalizations in one organization is far beyond what
+  the same path; I put their gap, and the drift between runs (579 to 1,181/s), down to run-to-run noise on a loaded laptop
+  (the cases run one after another, not interleaved); that's an inference, not something I measured. 16 simultaneous finalizations in one organization is far beyond what
   an invoicing tenant does, so the lock is the right trade for numbers without gaps. Every run ends by checking each
   organization's numbers are exactly 1..n.
 - **PDFs:** 0.115 ms for a 2-line invoice (3,055 bytes) and 0.535 ms for 100 lines over 4 pages (28,541 bytes),
