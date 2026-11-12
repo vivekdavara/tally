@@ -118,14 +118,15 @@ const formatters = new Map<string, Intl.NumberFormat>();
  * Minor units for display: 123456n USD → "$1,234.56". Intl.NumberFormat formats a decimal string exactly
  * (no conversion to a double on the way), so even 10^18 minor units print every digit.
  */
-export function formatMoney(minor: bigint, currency: Currency, locale = "en-US"): string {
-  const key = `${locale}|${currency}`;
+export function formatMoney(minor: bigint, currency: Currency, locale = "en-US", display: "symbol" | "code" = "symbol"): string {
+  const key = `${locale}|${currency}|${display}`;
   let formatter = formatters.get(key);
   if (!formatter) {
     const digits = CURRENCIES[currency];
     formatter = new Intl.NumberFormat(locale, {
       style: "currency",
       currency,
+      currencyDisplay: display,
       minimumFractionDigits: digits,
       maximumFractionDigits: digits,
     });

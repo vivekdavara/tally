@@ -1,5 +1,5 @@
 import { formatDate, invoiceLabel, STATUS_LABELS } from "./format";
-import { formatMoney, formatQuantity, formatTaxRate } from "./money";
+import { formatMoney, formatQuantity, formatTaxRate, type Currency } from "./money";
 import type { InvoiceView } from "./service";
 
 // Invoice PDFs, written directly (DESIGN.md, "PDFs"). An invoice needs text, a few rules and page breaks, which
@@ -33,24 +33,47 @@ const HELVETICA_BOLD_WIDTHS = [
   280, 389, 584,
 ];
 
-// The non-ASCII characters this layout uses in right-aligned text, same in both weights (AFM): the no-break
-// space Intl puts after a currency code, the middle dot in the footer, the currency symbols, dashes, ellipsis;
-// and the Latin letters much wider than a digit.
-const OTHER_WIDTHS: Record<number, number> = {
-  0xa0: 278, 0xb7: 278, 0x20ac: 556, 0xa3: 556, 0xa5: 556, 0x2013: 556, 0x2014: 1000, 0x2026: 1000,
-  0xc6: 1000, 0xe6: 889, 0x152: 1000, 0x153: 944,
+// Every other character Windows-1252 can encode, from the same AFM files (review round 2 of day 2: measuring them
+// all as a digit put capitals with umlauts over the title and ™ over the Qty column). Accented letters take their
+// base letter's width in Helvetica (À = A, é = e), so they are measured through NFD; these are the rest, as
+// [regular, bold].
+const OTHER_WIDTHS: Record<number, [number, number]> = {
+  0xa0: [278, 278], 0xa1: [333, 333], 0xa2: [556, 556], 0xa3: [556, 556], 0xa4: [556, 556], 0xa5: [556, 556],
+  0xa6: [260, 280], 0xa7: [556, 556], 0xa8: [333, 333], 0xa9: [737, 737], 0xaa: [370, 370], 0xab: [556, 556],
+  0xac: [584, 584], 0xad: [333, 333], 0xae: [737, 737], 0xaf: [333, 333], 0xb0: [400, 400], 0xb1: [584, 584],
+  0xb2: [333, 333], 0xb3: [333, 333], 0xb4: [333, 333], 0xb5: [556, 611], 0xb6: [537, 556], 0xb7: [278, 278],
+  0xb8: [333, 333], 0xb9: [333, 333], 0xba: [365, 365], 0xbb: [556, 556], 0xbc: [834, 834], 0xbd: [834, 834],
+  0xbe: [834, 834], 0xbf: [611, 611], 0xc6: [1000, 1000], 0xd0: [722, 722], 0xd7: [584, 584], 0xd8: [778, 778],
+  0xde: [667, 667], 0xdf: [611, 611], 0xe6: [889, 889], 0xf0: [556, 611], 0xf7: [584, 584], 0xf8: [611, 611],
+  // ì í î ï are built on the dotless i, wider than i (a pdfminer comparison caught them).
+  0xec: [278, 278], 0xed: [278, 278], 0xee: [278, 278], 0xef: [278, 278],
+  0xfe: [556, 611], 0x152: [1000, 1000], 0x153: [944, 944], 0x192: [556, 556], 0x2c6: [333, 333],
+  0x2dc: [333, 333], 0x2013: [556, 556], 0x2014: [1000, 1000], 0x2018: [222, 278], 0x2019: [222, 278],
+  0x201a: [222, 278], 0x201c: [333, 500], 0x201d: [333, 500], 0x201e: [333, 500], 0x2020: [556, 556],
+  0x2021: [556, 556], 0x2022: [350, 350], 0x2026: [1000, 1000], 0x2030: [1000, 1000], 0x2039: [333, 333],
+  0x203a: [333, 333], 0x20ac: [556, 556], 0x2122: [1000, 1000],
 };
 
 type Font = "F1" | "F2"; // Helvetica, Helvetica-Bold
 
-/** Width of `text` in points at `size` in `font`. */
-export function textWidth(text: string, size: number, font: Font = "F1"): number {
+/** One character's advance width in thousandths of the font size, as drawn (after WinAnsi encoding). */
+function charWidth(char: string, font: Font): number {
   const widths = font === "F2" ? HELVETICA_BOLD_WIDTHS : HELVETICA_WIDTHS;
+  const code = char.codePointAt(0)!;
+  if (code >= 32 && code <= 126) return widths[code - 32]!;
+  const other = OTHER_WIDTHS[code];
+  if (other) return other[font === "F2" ? 1 : 0];
+  // An accented Latin letter: its base letter's width.
+  const base = char.normalize("NFD").codePointAt(0)!;
+  if (base !== code && base >= 32 && base <= 126 && isWinAnsi(char)) return widths[base - 32]!;
+  // Anything else is printed as "?".
+  return widths["?".charCodeAt(0) - 32]!;
+}
+
+/** Width of `text` in points at `size` in `font`, as a viewer draws it. */
+export function textWidth(text: string, size: number, font: Font = "F1"): number {
   let units = 0;
-  for (const char of text) {
-    const code = char.codePointAt(0)!;
-    units += code >= 32 && code <= 126 ? widths[code - 32]! : (OTHER_WIDTHS[code] ?? 556);
-  }
+  for (const char of text.normalize("NFC")) units += charWidth(char, font);
   return (units * size) / 1000;
 }
 
@@ -61,6 +84,21 @@ const CP1252_HIGH: Record<number, number> = {
   0x201d: 0x94, 0x2022: 0x95, 0x2013: 0x96, 0x2014: 0x97, 0x02dc: 0x98, 0x2122: 0x99, 0x0161: 0x9a, 0x203a: 0x9b,
   0x0153: 0x9c, 0x017e: 0x9e, 0x0178: 0x9f,
 };
+
+/** Whether WinAnsiEncoding (Windows-1252) has this character. */
+export function isWinAnsi(char: string): boolean {
+  const code = char.codePointAt(0)!;
+  return (code >= 32 && code <= 126) || (code >= 0xa0 && code <= 0xff) || CP1252_HIGH[code] !== undefined;
+}
+
+/**
+ * An amount for the PDF: as on the page, unless the currency's symbol can't be encoded (₹ isn't in
+ * Windows-1252, so every INR amount printed "?53.42": review round 2), then with the ISO code ("INR 53.42").
+ */
+export function pdfMoney(minor: bigint, currency: Currency): string {
+  const shown = formatMoney(minor, currency);
+  return [...shown].every(isWinAnsi) ? shown : formatMoney(minor, currency, "en-US", "code");
+}
 
 /** `text` as a PDF literal string in WinAnsiEncoding: one byte per character, "?" for the unencodable. */
 export function pdfString(text: string): string {
@@ -76,11 +114,12 @@ export function pdfString(text: string): string {
 
 /**
  * Splits `text` into lines no wider than `width` points, breaking at spaces, or inside a word too long for a
- * line (between code points, so a surrogate pair is never split into two "?").
+ * line: between grapheme clusters of the NFC form, so neither a surrogate pair nor a letter and its combining
+ * accent is ever split (review rounds 1 and 2).
  */
 export function wrap(text: string, size: number, width: number, font: Font = "F1"): string[] {
   const lines: string[] = [];
-  for (const paragraph of text.split("\n")) {
+  for (const paragraph of text.normalize("NFC").split("\n")) {
     let current = "";
     for (const word of paragraph.split(/ +/)) {
       const candidate = current === "" ? word : `${current} ${word}`;
@@ -89,7 +128,7 @@ export function wrap(text: string, size: number, width: number, font: Font = "F1
         continue;
       }
       if (current !== "") lines.push(current);
-      let rest = Array.from(word);
+      let rest = graphemes(word);
       while (rest.length > 1 && textWidth(rest.join(""), size, font) > width) {
         let cut = rest.length - 1;
         while (cut > 1 && textWidth(rest.slice(0, cut).join(""), size, font) > width) cut--;
@@ -103,11 +142,14 @@ export function wrap(text: string, size: number, width: number, font: Font = "F1
   return lines;
 }
 
+const segmenter = new Intl.Segmenter("en", { granularity: "grapheme" });
+const graphemes = (text: string): string[] => Array.from(segmenter.segment(text), (s) => s.segment);
+
 /** At most `max` of `lines`; if any were dropped, the last kept one ends in an ellipsis (still within `width`). */
 export function clip(lines: string[], max: number, size: number, width: number, font: Font = "F1"): string[] {
   if (lines.length <= max) return lines;
   const kept = lines.slice(0, max);
-  let last = Array.from(kept[max - 1]!);
+  let last = graphemes(kept[max - 1]!);
   while (last.length > 0 && textWidth(`${last.join("")}…`, size, font) > width) last = last.slice(0, -1);
   kept[max - 1] = `${last.join("")}…`;
   return kept;
@@ -134,7 +176,7 @@ export interface PdfInput {
 
 /** The invoice as PDF bytes. */
 export function renderInvoicePdf({ organizationName, invoice }: PdfInput): Uint8Array {
-  const money = (minor: bigint) => formatMoney(minor, invoice.currency);
+  const money = (minor: bigint) => pdfMoney(minor, invoice.currency);
   const label = invoiceLabel(invoice.number);
   const draft = invoice.status === "DRAFT";
   const pages: Page[] = [];
@@ -235,7 +277,9 @@ export function renderInvoicePdf({ organizationName, invoice }: PdfInput): Uint8
 
   invoice.lines.forEach((line, i) => {
     const description = wrap(line.description, 10, descriptionWidth);
-    need(description.length * 13 + 5, "table");
+    // Keep a line item together when it fits on a page; a description taller than a page (possible when the
+    // columns leave it little width) continues on the next, one row at a time (review round 2).
+    need(Math.min(description.length * 13 + 5, 13 * 8), "table");
     const cell = cells[i]!;
     page.text(MARGIN, y, description[0]!, 10);
     page.right(col.qty, y, cell.qty);
@@ -244,6 +288,7 @@ export function renderInvoicePdf({ organizationName, invoice }: PdfInput): Uint8
     page.right(col.amount, y, cell.amount);
     for (const more of description.slice(1)) {
       y -= 13;
+      need(0, "table");
       page.text(MARGIN, y, more, 10);
     }
     y -= 18;
