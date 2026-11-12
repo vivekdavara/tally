@@ -11,8 +11,8 @@ import type { InvoiceView } from "./service";
 const PAGE = { width: 612, height: 792 }; // US Letter, in points
 const MARGIN = 50;
 const RIGHT = PAGE.width - MARGIN;
-const COLUMNS = { qty: 340, price: 430, tax: 485, amount: RIGHT } as const; // right edges
-const DESCRIPTION_WIDTH = 230;
+const GAP = 14; // between table columns
+const BILL_TO_WIDTH = 260;
 
 // Helvetica's advance widths (thousandths of the font size) for ASCII 32-126, from its AFM file. Other
 // characters use OTHER_WIDTHS, or 556 (a digit's width, close for the accented letters WinAnsi has).
@@ -34,9 +34,11 @@ const HELVETICA_BOLD_WIDTHS = [
 ];
 
 // The non-ASCII characters this layout uses in right-aligned text, same in both weights (AFM): the no-break
-// space Intl puts after a currency code, the middle dot in the footer, the currency symbols, dashes, ellipsis.
+// space Intl puts after a currency code, the middle dot in the footer, the currency symbols, dashes, ellipsis;
+// and the Latin letters much wider than a digit.
 const OTHER_WIDTHS: Record<number, number> = {
   0xa0: 278, 0xb7: 278, 0x20ac: 556, 0xa3: 556, 0xa5: 556, 0x2013: 556, 0x2014: 1000, 0x2026: 1000,
+  0xc6: 1000, 0xe6: 889, 0x152: 1000, 0x153: 944,
 };
 
 type Font = "F1" | "F2"; // Helvetica, Helvetica-Bold
@@ -72,32 +74,43 @@ export function pdfString(text: string): string {
   return `${out})`;
 }
 
-/** Splits `text` into lines no wider than `width` points, breaking at spaces (or inside a too-long word). */
-export function wrap(text: string, size: number, width: number): string[] {
+/**
+ * Splits `text` into lines no wider than `width` points, breaking at spaces, or inside a word too long for a
+ * line (between code points, so a surrogate pair is never split into two "?").
+ */
+export function wrap(text: string, size: number, width: number, font: Font = "F1"): string[] {
   const lines: string[] = [];
   for (const paragraph of text.split("\n")) {
     let current = "";
     for (const word of paragraph.split(/ +/)) {
       const candidate = current === "" ? word : `${current} ${word}`;
-      if (textWidth(candidate, size) <= width) {
+      if (textWidth(candidate, size, font) <= width) {
         current = candidate;
         continue;
       }
       if (current !== "") lines.push(current);
-      current = "";
-      // A word wider than the line is cut into pieces that fit.
-      let rest = word;
-      while (textWidth(rest, size) > width) {
+      let rest = Array.from(word);
+      while (rest.length > 1 && textWidth(rest.join(""), size, font) > width) {
         let cut = rest.length - 1;
-        while (cut > 1 && textWidth(rest.slice(0, cut), size) > width) cut--;
-        lines.push(rest.slice(0, cut));
+        while (cut > 1 && textWidth(rest.slice(0, cut).join(""), size, font) > width) cut--;
+        lines.push(rest.slice(0, cut).join(""));
         rest = rest.slice(cut);
       }
-      current = rest;
+      current = rest.join("");
     }
     lines.push(current);
   }
   return lines;
+}
+
+/** At most `max` of `lines`; if any were dropped, the last kept one ends in an ellipsis (still within `width`). */
+export function clip(lines: string[], max: number, size: number, width: number, font: Font = "F1"): string[] {
+  if (lines.length <= max) return lines;
+  const kept = lines.slice(0, max);
+  let last = Array.from(kept[max - 1]!);
+  while (last.length > 0 && textWidth(`${last.join("")}…`, size, font) > width) last = last.slice(0, -1);
+  kept[max - 1] = `${last.join("")}…`;
+  return kept;
 }
 
 /** A page's content stream under construction. */
@@ -128,12 +141,34 @@ export function renderInvoicePdf({ organizationName, invoice }: PdfInput): Uint8
   let page = new Page();
   let y = 0;
 
+  // Columns, right to left, each as wide as its widest cell (and at least the usual width, so an ordinary invoice
+  // always has the same layout): even the largest amounts the limits allow fit at full size without overlapping
+  // the next column (review of day 2), and the description gets what's left.
+  const cells = invoice.lines.map((l) => ({
+    qty: formatQuantity(l.quantity),
+    price: money(l.unitPriceMinor),
+    tax: `${formatTaxRate(l.taxRate)}%`,
+    amount: money(l.amount),
+  }));
+  const totals: { name: string; value: string; font: Font; size: number }[] = [
+    { name: "Subtotal", value: money(invoice.totals.subtotal), font: "F1", size: 10 },
+    ...invoice.totals.taxes.map((g) => ({ name: `Tax ${formatTaxRate(g.rate)}% on ${money(g.base)}`, value: money(g.tax), font: "F1" as Font, size: 10 })),
+    { name: "Total", value: money(invoice.totals.total), font: "F2", size: 11 },
+  ];
+  const widest = (minimum: number, header: string, texts: string[], extra: number[] = []) =>
+    Math.max(minimum, textWidth(header, 9, "F2"), ...texts.map((t) => textWidth(t, 10)), ...extra);
+  const col = { amount: RIGHT, tax: 0, price: 0, qty: 0 };
+  col.tax = col.amount - widest(63, "Amount", cells.map((c) => c.amount), totals.map((t) => textWidth(t.value, t.size, t.font))) - GAP;
+  col.price = col.tax - widest(41, "Tax", cells.map((c) => c.tax)) - GAP;
+  col.qty = col.price - widest(76, "Unit price", cells.map((c) => c.price)) - GAP;
+  const descriptionWidth = col.qty - widest(46, "Qty", cells.map((c) => c.qty)) - GAP - MARGIN;
+
   const tableHeader = () => {
     page.text(MARGIN, y, "Description", 9, "F2");
-    page.right(COLUMNS.qty, y, "Qty", 9, "F2");
-    page.right(COLUMNS.price, y, "Unit price", 9, "F2");
-    page.right(COLUMNS.tax, y, "Tax", 9, "F2");
-    page.right(COLUMNS.amount, y, "Amount", 9, "F2");
+    page.right(col.qty, y, "Qty", 9, "F2");
+    page.right(col.price, y, "Unit price", 9, "F2");
+    page.right(col.tax, y, "Tax", 9, "F2");
+    page.right(col.amount, y, "Amount", 9, "F2");
     y -= 6;
     page.rule(y);
     y -= 14;
@@ -144,7 +179,7 @@ export function renderInvoicePdf({ organizationName, invoice }: PdfInput): Uint8
     pages.push(page);
     y = PAGE.height - MARGIN;
     if (kind !== "first") {
-      page.text(MARGIN, y, `${organizationName} · ${label} (continued)`, 9, "F1", 0.4);
+      page.text(MARGIN, y, clip(wrap(`${organizationName} · ${label} (continued)`, 9, RIGHT - MARGIN), 1, 9, RIGHT - MARGIN)[0]!, 9, "F1", 0.4);
       y -= 24;
       if (kind === "table") tableHeader();
     }
@@ -154,10 +189,17 @@ export function renderInvoicePdf({ organizationName, invoice }: PdfInput): Uint8
     if (y - height < MARGIN + 30) newPage(kind);
   };
 
+  // Letterhead: the organization's name wraps (two lines at most) beside the title.
   newPage("first");
-  page.text(MARGIN, y - 4, organizationName, 18, "F2");
-  page.right(RIGHT, y - 4, draft ? "DRAFT INVOICE" : "INVOICE", 18, "F2", draft ? 0.55 : 0);
-  y -= 34;
+  const title = draft ? "DRAFT INVOICE" : "INVOICE";
+  const nameWidth = RIGHT - MARGIN - textWidth(title, 18, "F2") - 20;
+  const nameLines = clip(wrap(organizationName, 18, nameWidth, "F2"), 2, 18, nameWidth, "F2");
+  page.right(RIGHT, y - 4, title, 18, "F2", draft ? 0.55 : 0);
+  for (const nameLine of nameLines) {
+    page.text(MARGIN, y - 4, nameLine, 18, "F2");
+    y -= 22;
+  }
+  y -= 12;
   const facts: [string, string][] = [
     ["Invoice", label],
     ["Status", STATUS_LABELS[invoice.status]],
@@ -171,44 +213,50 @@ export function renderInvoicePdf({ organizationName, invoice }: PdfInput): Uint8
     page.right(RIGHT, y, value, 10);
     y -= 14;
   }
+  // Bill to, in a column clear of the facts: every part wrapped to it, and capped so the block always fits on
+  // the first page (3 lines of name, 2 of email, 6 of address; an ellipsis marks a cut).
   let billY = factsTop;
   page.text(MARGIN, billY, "Bill to", 9, "F1", 0.4);
   billY -= 14;
-  page.text(MARGIN, billY, invoice.customer.name, 11, "F2");
-  billY -= 14;
-  for (const lineText of [invoice.customer.email, ...(invoice.customer.address ? wrap(invoice.customer.address, 10, 260) : [])]) {
-    page.text(MARGIN, billY, lineText, 10);
+  for (const nameLine of clip(wrap(invoice.customer.name, 11, BILL_TO_WIDTH, "F2"), 3, 11, BILL_TO_WIDTH, "F2")) {
+    page.text(MARGIN, billY, nameLine, 11, "F2");
+    billY -= 14;
+  }
+  const contact = [
+    ...clip(wrap(invoice.customer.email, 10, BILL_TO_WIDTH), 2, 10, BILL_TO_WIDTH),
+    ...(invoice.customer.address ? clip(wrap(invoice.customer.address, 10, BILL_TO_WIDTH), 6, 10, BILL_TO_WIDTH) : []),
+  ];
+  for (const contactLine of contact) {
+    page.text(MARGIN, billY, contactLine, 10);
     billY -= 13;
   }
   y = Math.min(y, billY) - 20;
   tableHeader();
 
-  for (const line of invoice.lines) {
-    const description = wrap(line.description, 10, DESCRIPTION_WIDTH);
+  invoice.lines.forEach((line, i) => {
+    const description = wrap(line.description, 10, descriptionWidth);
     need(description.length * 13 + 5, "table");
+    const cell = cells[i]!;
     page.text(MARGIN, y, description[0]!, 10);
-    page.right(COLUMNS.qty, y, formatQuantity(line.quantity));
-    page.right(COLUMNS.price, y, money(line.unitPriceMinor));
-    page.right(COLUMNS.tax, y, `${formatTaxRate(line.taxRate)}%`);
-    page.right(COLUMNS.amount, y, money(line.amount));
+    page.right(col.qty, y, cell.qty);
+    page.right(col.price, y, cell.price);
+    page.right(col.tax, y, cell.tax);
+    page.right(col.amount, y, cell.amount);
     for (const more of description.slice(1)) {
       y -= 13;
       page.text(MARGIN, y, more, 10);
     }
     y -= 18;
-  }
+  });
 
-  const totals: [string, string, Font][] = [
-    ["Subtotal", money(invoice.totals.subtotal), "F1"],
-    ...invoice.totals.taxes.map((g): [string, string, Font] => [`Tax ${formatTaxRate(g.rate)}% on ${money(g.base)}`, money(g.tax), "F1"]),
-    ["Total", money(invoice.totals.total), "F2"],
-  ];
-  need(totals.length * 18 + 10, "plain");
-  page.rule(y + 8, COLUMNS.price - 60);
-  for (const [name, value, font] of totals) {
+  // One check per row: with up to 100 tax rates the block can be longer than a page.
+  need(30, "plain");
+  page.rule(y + 8, col.price - 60);
+  for (const row of totals) {
+    need(18, "plain");
     y -= 4;
-    page.right(COLUMNS.tax, y, name, font === "F2" ? 11 : 10, font);
-    page.right(COLUMNS.amount, y, value, font === "F2" ? 11 : 10, font);
+    page.right(col.tax, y, row.name, row.size, row.font);
+    page.right(col.amount, y, row.value, row.size, row.font);
     y -= 14;
   }
   if (invoice.memo) {

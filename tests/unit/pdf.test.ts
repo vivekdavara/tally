@@ -88,9 +88,14 @@ describe("renderInvoicePdf", () => {
   it("keeps every drawn line inside the page's margins", () => {
     const lines = Array.from({ length: 100 }, (_, i) => ({ description: `Item ${i}`, quantity: 1000n, unitPriceMinor: 1n, taxRate: 0n }));
     const pdf = text(renderInvoicePdf({ organizationName: "A", invoice: sampleInvoice({ lines }) }));
-    for (const m of pdf.matchAll(/\/F\d (\d+) Tf [\d.]+ g ([\d.]+) ([\d.]+) Td/g)) {
-      const [x, y] = [Number(m[2]), Number(m[3])];
+    // Negative coordinates included: the first version of this regex skipped them, so text drawn below the page
+    // went unnoticed (review of day 2).
+    const placed = [...pdf.matchAll(/\/(F\d) (\d+) Tf [\d.]+ g (-?[\d.]+) (-?[\d.]+) Td \(((?:\\.|[^\\)])*)\) Tj/g)];
+    expect(placed.length).toBeGreaterThan(300);
+    for (const m of placed) {
+      const [font, size, x, y] = [m[1] as "F1" | "F2", Number(m[2]), Number(m[3]), Number(m[4])];
       expect(x).toBeGreaterThanOrEqual(50);
+      expect(x + textWidth(m[5]!.replace(/\\(.)/g, "$1"), size, font)).toBeLessThanOrEqual(562.01);
       expect(y).toBeGreaterThanOrEqual(39); // the footer line sits 10 pt below the bottom margin
       expect(y).toBeLessThanOrEqual(742);
     }
