@@ -4,7 +4,7 @@ import type { InvoiceView } from "./service";
 
 // Invoice PDFs, written directly (DESIGN.md, "PDFs"). An invoice needs text, a few rules and page breaks, which
 // PDF's built-in Helvetica covers without embedding a font; writing the file by hand keeps it a dependency-free
-// ~250 lines whose every byte a test can check. The output is deterministic (no timestamps or ids), so the same
+// under 300 lines whose every byte a test can check. The output is deterministic (no timestamps or ids), so the same
 // invoice always gives the same bytes. Limits: the standard fonts use WinAnsiEncoding, so characters outside
 // Windows-1252 print as "?" (DESIGN.md says what embedding a font would take).
 
