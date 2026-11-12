@@ -1,15 +1,17 @@
 # Tally
 
-A multi-tenant invoicing service. Businesses sign up as **organizations**, keep their **customers**, and (from day
-2) send them **invoices**. Every organization's data lives in one shared Postgres database, so the property the
+A multi-tenant invoicing service. Businesses sign up as **organizations**, keep their **customers**, and send them
+**invoices** with exact totals, gapless numbers and PDFs. Every organization's data lives in one shared Postgres database, so the property the
 whole design is built around is **tenant isolation**: a request made for one organization can't read or change
 another's data, even when the application code has a bug.
 
 Next.js 16 (App Router, Server Components, Server Actions), Prisma 7 with the `pg` driver adapter, PostgreSQL 14
 row-level security, Auth.js v5, Zod, Vitest, Playwright, TypeScript.
 
-**Status: day 1 of 5.** Design, scaffold, schema and migrations with row-level security, database roles, sign-up and
-sign-in, the first tenant page, tests and CI. [DESIGN.md](DESIGN.md) is the specification;
+**Status: day 2 of 5.** Day 1: design, scaffold, schema and migrations with row-level security, database roles,
+sign-up and sign-in, tests and CI. Day 2: customers; invoices with line items, totals and per-rate taxes in exact
+integer arithmetic; gapless per-organization numbering and the invoice life cycle enforced by the database; invoice
+PDFs. [DESIGN.md](DESIGN.md) is the specification;
 [WALKTHROUGH.md](WALKTHROUGH.md) answers the questions an interviewer is likely to ask.
 
 ## Why
@@ -33,6 +35,18 @@ row that references another tenant's row impossible to store, and the applicatio
 it can't choose or change ids, change `organization_id`, or delete organizations or users, because cascades and key
 checks run without row security.
 
+Invoices add a second kind of guarantee, about money rather than tenants:
+
+- **Amounts are integers** (`bigint` minor units), quantities and tax rates exact thousandths; input with more
+  decimals than it can hold is refused, never rounded; one stated rounding rule (half up per line, then once per
+  tax rate) is implemented in TypeScript for display and in SQL for the stored totals, and a differential test keeps
+  the two equal.
+- **Invoice numbers have no gaps**, per organization, even with concurrent finalizations and rollbacks: the number
+  comes from a counter row locked by the finalizing transaction, so a rollback hands it back.
+- **Final means final, for every writer.** Triggers enforce the life cycle (draft → open → paid or void), assign the
+  number, issue time and totals themselves (the application has no privilege on those columns), and refuse any change
+  to a final invoice or its lines, including from raw SQL that skips the services.
+
 ## Architecture
 
 ```mermaid
@@ -41,7 +55,7 @@ flowchart LR
     P --> A["Auth.js<br/>JWT cookie: user id only"]
     P --> D["requireMembership(slug)<br/>404 unless a member"]
     D --> T["withTenant(orgId, fn)<br/>one transaction"]
-    T -->|"set_config('app.organization_id', orgId, true)"| PG[("PostgreSQL 14<br/>RLS forced on customers,<br/>invoices, invoice_lines")]
+    T -->|"set_config('app.organization_id', orgId, true)"| PG[("PostgreSQL 14<br/>RLS forced on customers, invoices,<br/>invoice_lines, invoice_counters;<br/>life-cycle triggers")]
     T -->|"as tally_app"| PG
     M["prisma migrate deploy"] -->|"as tally_owner"| PG
     S["startup + /api/health:<br/>assertSafeAppRole"] --> PG
@@ -56,12 +70,17 @@ prisma/migrations/               SQL: tables and CHECKs; row-level security and 
 scripts/db-setup.sh              roles (tally_owner, tally_app) and databases, idempotent
 scripts/bench-tenant.ts          what isolation costs per query
 scripts/bench-signin.ts          whether sign-in timing reveals which emails exist
+scripts/bench-finalize.ts        what gapless numbering costs: one organization vs many
+scripts/sample-pdf.ts            sample invoice PDFs (synthetic) for looking at the layout
 src/server/db/tenant.ts          withTenant
 src/server/db/role-check.ts      assertSafeAppRole: is RLS binding this connection?
 src/server/auth/                 passwords (scrypt), Zod schemas, credentials, sign-up
-src/server/dal.ts                requireUser, requireMembership
+src/server/dal.ts                requireUser, requireMembership, requireTenant
+src/server/invoices/money.ts     exact arithmetic: parsing, rounding, totals, formatting
+src/server/invoices/service.ts   customers, drafts, lines, finalize, paid, void (inside a tenant transaction)
+src/server/invoices/pdf.ts       the PDF writer
 src/auth.ts                      Auth.js configuration
-src/app/                         pages, Server Actions, /api/auth, /api/health
+src/app/                         pages, Server Actions, /api/auth, /api/health, /o/[slug]/invoices/[id]/pdf
 tests/unit, tests/integration    Vitest (integration tests against real Postgres)
 e2e/                             Playwright
 ```
@@ -88,11 +107,50 @@ Checks:
 ```bash
 npm run check                       # typecheck, lint, unit + integration tests (needs Postgres)
 npm run build && npm run e2e        # Playwright against next start on :8117, database tally_e2e
-scripts/db-setup.sh tally_bench && npm run bench && npm run bench:signin
+scripts/db-setup.sh tally_bench && npm run bench && npm run bench:signin && npm run bench:finalize
+npx tsx scripts/sample-pdf.ts .scratch/pdf   # writes sample PDFs (synthetic invoices)
 ```
 
 On Node 23 (this Mac's), Prisma's preinstall refuses to run; `npm ci --ignore-scripts && npx prisma generate` works,
 and everything else runs.
+
+## Results (day 2)
+
+Apple M3 laptop (macOS 26.6.2, Node 23.11, Postgres 14.20), **on battery**, with a review agent running tests on the
+same machine during the benchmark (load average 2.3).
+
+- **Tests:** 307 Vitest tests in 33 files (`npm run check`, 24.8 s with files run one at a time), 98 of them new
+  today; 14 Playwright tests (`npm run e2e`, 9.1 s), 3 new. The new ones: money.ts against a differently written
+  oracle (20,000 random roundings, 3,000 random invoices); SQL `invoice_totals()` equal to money.ts on 600 random
+  invoices, where per-line rounding would have differed on more than 50 (`tests/integration/totals-differential.test.ts`;
+  making money.ts round half down fails it); the life cycle through the services and through raw SQL;
+  **40 concurrent finalizations with 10 rolled back numbered exactly 1..30**; a line insert racing a finalization
+  shown blocked on the lock in `pg_stat_activity`, then refused; the PDF's every xref offset, its text, pagination
+  and encoding; e2e of a draft finalized to INV-0001 with a total worked out by hand ($53.42), its PDF, and 404s for
+  another organization's ids.
+- **What gapless numbering costs** (`npm run bench:finalize`: 1,000 finalizations per case after 100 warm-up, each
+  invoice 5 lines, through `withTenant` as `tally_app`, a pool of as many connections as workers; synthetic):
+
+  | Case | Workers | Finalizations/s | p50 | p95 | p99 |
+  |---|---|---|---|---|---|
+  | one organization | 1 | 1,011 | 0.88 ms | 1.34 ms | 1.65 ms |
+  | spread over organizations | 1 | 1,181 | 0.80 ms | 1.07 ms | 1.60 ms |
+  | one organization | 4 | 2,394 | 1.51 ms | 2.65 ms | 3.54 ms |
+  | spread | 4 | 2,930 | 1.31 ms | 1.87 ms | 2.07 ms |
+  | one organization | 16 | 2,033 | 5.26 ms | 22.57 ms | 33.91 ms |
+  | spread | 16 | 3,076 | 4.67 ms | 7.29 ms | 8.03 ms |
+
+  One organization's finalizations take turns on its counter row from the upsert to `COMMIT` (three round trips),
+  so at 16 concurrent finalizers in one organization the p95 is three times the spread case's and throughput stops
+  growing; across organizations nothing waits. 16 simultaneous finalizations in one organization is far beyond what an
+  invoicing tenant does, so the lock is the right trade for numbers without gaps. The run ends by checking every
+  organization's numbers are exactly 1..n. With one worker there's nothing to wait for, so the
+  two 1-worker rows measure the same path; their gap is run-to-run variation (the cases run one after another, not
+  interleaved).
+- **PDFs:** rendering takes 0.107 ms for a 2-line invoice (3,055 bytes) and 0.456 ms for 100 lines over 4 pages
+  (28,541 bytes), median of 200 (same run). On the sample invoices, pdfplumber's text extraction returns every field,
+  and every right-aligned line ends within 0.05 pt of the margin (amounts in € excepted: pdfminer's built-in
+  Helvetica metrics have no Euro glyph, so it measures € as zero-width).
 
 ## Results (day 1)
 
@@ -176,10 +234,22 @@ finding as a failing test (`tests/review/`).
 - **scrypt from Node's standard library**, parameters stored per hash, NFKC-normalized input, a dummy hash for
   unknown emails so sign-in timing doesn't reveal accounts.
 
+## Limitations (day 2)
+
+- Billing (Stripe) is day 3, roles enforced and the full isolation suite day 4: today any member can finalize,
+  void or mark an invoice paid.
+- No discounts, credit notes or negative lines: every amount is non-negative, which is what lets "half up" and "half
+  away from zero" be one rule. Tax is a rate per line; there are no tax-inclusive prices or compound taxes.
+- PDFs use the standard Helvetica (no embedded font), so characters outside Windows-1252 print as "?".
+- The due date is computed from the database's UTC date in the finalizing statement; if UTC midnight passes between
+  that and the trigger's issue time (microseconds apart), a "due on receipt" finalization is refused and has to be
+  retried.
+- Prisma ran the day-2 migration outside a single transaction: on a database whose existing rows broke a new CHECK, it
+  stopped halfway (seen on the local test database; recreated). A real deployment would run it in one transaction.
+
 ## Limitations (day 1)
 
-- Only sign-up, sign-in and an organization overview exist; customers and invoices arrive on day 2, billing on day
-  3, roles enforced and the full isolation suite on day 4.
+- Only sign-up, sign-in and an organization overview existed on day 1.
 - Sign-up tells you when an email already has an account (as most sign-up forms do); hiding that needs an email
   verification flow, which needs an email provider.
 - No rate limiting on sign-in yet (day 4).
