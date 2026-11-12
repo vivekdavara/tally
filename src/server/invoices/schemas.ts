@@ -15,6 +15,10 @@ import {
 const CONTROL = /\p{Cc}/u;
 // Multi-line fields keep line breaks (as \n) and refuse every other control character.
 const CONTROL_EXCEPT_NEWLINE = /[^\P{Cc}\n]/u;
+// Bidirectional embeddings, overrides and isolates: they make text display in a different order from the one
+// stored ("Trojan Source"), which on an invoice could make a name or an amount in a description read as
+// something else (review of day 2).
+const BIDI_CONTROL = /[\u202a-\u202e\u2066-\u2069]/u;
 
 const line = (what: string, max: number) =>
   z
@@ -22,9 +26,9 @@ const line = (what: string, max: number) =>
     .trim()
     .min(1, `Enter ${what}.`)
     .max(max, `Use at most ${max} characters for ${what}.`)
-    .refine((value) => !CONTROL.test(value), `Remove control characters from ${what}.`);
+    .refine((value) => !CONTROL.test(value) && !BIDI_CONTROL.test(value), `Remove control characters from ${what}.`);
 
-const multiline = (what: string, max: number) =>
+const multiline = (what: string, max: number, maxLines = 20) =>
   z
     .string()
     .transform((value) => value.replace(/\r\n?/g, "\n").trim())
@@ -32,14 +36,16 @@ const multiline = (what: string, max: number) =>
       z
         .string()
         .max(max, `Use at most ${max} characters for ${what}.`)
-        .refine((value) => !CONTROL_EXCEPT_NEWLINE.test(value), `Remove control characters from ${what}.`),
+        .refine((value) => !CONTROL_EXCEPT_NEWLINE.test(value) && !BIDI_CONTROL.test(value), `Remove control characters from ${what}.`)
+        .refine((value) => value.split("\n").length <= maxLines, `Use at most ${maxLines} lines for ${what}.`),
     )
     .transform((value) => (value === "" ? null : value));
 
 export const customerInput = z.object({
   name: line("a name", 200),
   email,
-  address: multiline("the address", 500),
+  // Six lines: what the PDF's bill-to block prints (src/server/invoices/pdf.ts).
+  address: multiline("the address", 500, 6),
 });
 export type CustomerInput = z.infer<typeof customerInput>;
 

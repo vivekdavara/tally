@@ -12,6 +12,11 @@ describe("customerInput", () => {
     });
   });
 
+  it("takes an address of six lines, and letters from any script", () => {
+    expect(customerInput.parse({ name: "東京商事", email: "n@example.com", address: "1\n2\n3\n4\n5\n6" }).address).toBe("1\n2\n3\n4\n5\n6");
+    expect(customerInput.parse({ name: "شركة", email: "n@example.com", address: "" }).name).toBe("شركة");
+  });
+
   it("stores an empty address as null", () => {
     expect(customerInput.parse({ name: "N", email: "n@example.com", address: "   \n " }).address).toBeNull();
   });
@@ -24,6 +29,9 @@ describe("customerInput", () => {
     ["an address over 500 characters", { name: "N", email: "n@example.com", address: "x".repeat(501) }, "address"],
     ["a name over 200 characters", { name: "x".repeat(201), email: "n@example.com", address: "" }, "name"],
     ["no email", { name: "N", email: "", address: "" }, "email"],
+    ["an address of seven lines", { name: "N", email: "n@example.com", address: "1\n2\n3\n4\n5\n6\n7" }, "address"],
+    ["a right-to-left override in the name", { name: "Invoice \u202egnp.exe", email: "n@example.com", address: "" }, "name"],
+    ["an isolate in the address", { name: "N", email: "n@example.com", address: "a\u2066b" }, "address"],
   ])("refuses %s", (_, input, field) => {
     const result = customerInput.safeParse(input);
     expect(result.success).toBe(false);
@@ -88,6 +96,10 @@ describe("parseLine", () => {
   it("refuses a price in yen with decimals, where the same text is fine in dollars", () => {
     expect(parseLine(typed({ unitPrice: "12.50" }), "USD")).toMatchObject({ ok: true, line: { unitPriceMinor: 1250n } });
     expect(parseLine(typed({ unitPrice: "12.50" }), "JPY")).toEqual({ ok: false, fieldErrors: { unitPrice: ["Price can't have decimals"] } });
+  });
+
+  it("refuses a bidirectional override in a description", () => {
+    expect(parseLine(typed({ description: "Fee \u202d$100\u202c" }), "USD")).toMatchObject({ ok: false, fieldErrors: { description: ["Remove control characters from a description."] } });
   });
 
   it("refuses a missing or empty description, and fields that aren't text", () => {
