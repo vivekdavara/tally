@@ -116,8 +116,8 @@ and everything else runs.
 
 ## Results (day 2)
 
-Apple M3 laptop (macOS 26.6.2, Node 23.11, Postgres 14.20). The tests and the first benchmark run were on battery; the
-final benchmark runs on AC, with a review agent running tests on the same machine (load average 4.7 to 5.5).
+Apple M3 laptop (macOS 26.6.2, Node 23.11, Postgres 14.20). The first benchmark run was on battery; the final ones on
+AC, with a review agent running tests on the same machine (load average 4.7 to 5.5).
 
 - **Tests:** 377 Vitest tests in 45 files (`npm run check`, 27.6 s with files run one at a time), 168 of them new
   today; 16 Playwright tests (`npm run e2e`, 13.5 s), 5 new. Among the new: money.ts against a differently written
@@ -290,7 +290,11 @@ finding as a failing test (`tests/review/`).
   void or mark an invoice paid.
 - No discounts, credit notes or negative lines: every amount is non-negative, which is what lets "half up" and "half
   away from zero" be one rule. Tax is a rate per line; there are no tax-inclusive prices or compound taxes.
-- PDFs use the standard Helvetica (no embedded font), so characters outside Windows-1252 print as "?".
+- PDFs use the standard Helvetica (no embedded font), so characters outside Windows-1252 print as "?" (a currency
+  symbol outside it, like ₹, falls back to the ISO code in the PDF). Names and emails longer than the bill-to block's
+  lines are clipped there with an ellipsis.
+- A final invoice keeps its customer's details, but not the organization's own name: nothing can rename an
+  organization yet, and day 4's settings page will need to snapshot it too.
 - The due date is computed from the database's UTC date in the finalizing statement; if UTC midnight passes between
   that and the trigger's issue time (microseconds apart), a "due on receipt" finalization is refused and has to be
   retried.
