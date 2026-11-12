@@ -282,6 +282,32 @@ them means embedding a TrueType subset, which is when a library like pdf-lib ear
 text with pdfplumber, whose metrics showed every right-aligned line ending within 0.05 pt of the margin, after I
 added Helvetica-Bold's widths (the bold "Amount" header overran by a few points when measured with regular widths).
 
+**What did day 2's review find, and what does it say about the design?**
+That the database enforcement had holes exactly where the application role still holds a grant. The counter needs
+`INSERT`/`UPDATE` because the trigger runs as the caller, so any statement could move it (`+41` gave invoice 43); it now
+has its own guard that accepts writes only from inside another trigger (`pg_trigger_depth() > 1`), one step at a time.
+Two more were latent behind grants the app doesn't have (a temp table shadowing the triggers' tables; moving a line
+out of a final invoice), fixed anyway and added to the startup role check, so a database set up differently fails
+loudly. And the PDF writer drew text off the page for inputs the validation allows (`tests/review-d2/`).
+
+**Why not make the counter function `SECURITY DEFINER`, so the app needs no grant on the counter at all?**
+A definer function runs as its owner, and the owner of these tables can bypass row-level security unless every
+statement inside is written with that in mind. D1's role check refuses to start if the app can execute any definer
+function, a deliberately blunt rule, and a trigger-depth guard keeps it.
+
+**Why copy the customer's details onto a finalized invoice?**
+An issued invoice is a document that was sent; if renaming a customer changed it, the PDF you'd regenerate for an
+auditor wouldn't be the one the customer received. The trigger copies name, email and address at finalization and
+freezes them with the rest (`a final invoice's bill-to details` in the invoice tests). Drafts still follow the
+customer.
+
+**What did your own tests catch on day 2?**
+Three bugs: the issue time taken before the number (a concurrency test saw #N+1 stamped 1 ms before #N); a duplicate
+customer email returning a 500, because the service caught the unique violation inside a transaction Postgres had
+already aborted, which `withTenant`'s day-1 guard turns into an error at commit (the guard working as designed,
+on code I'd just written); and bold text measured with regular widths. Plus a migration that Prisma applied only
+halfway when an old row broke a new CHECK.
+
 ## What I'd do next, or differently at scale
 
 - Rate-limit sign-in (day 4), and email verification to stop sign-up from revealing accounts.
