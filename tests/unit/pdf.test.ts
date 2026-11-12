@@ -102,6 +102,28 @@ describe("renderInvoicePdf", () => {
   });
 });
 
+describe("the bill-to block", () => {
+  it("prints the worst valid name, email and address in full, all on page 1 above the table", async () => {
+    const { customerInput } = await import("@/server/invoices/schemas");
+    // The widest characters each field allows, at each field's length limit.
+    const input = customerInput.parse({
+      name: "W".repeat(200),
+      email: `${"@".repeat(0)}${"w".repeat(64)}@${"m".repeat(63)}.${"m".repeat(63)}.${"m".repeat(57)}`,
+      address: ["W".repeat(37), "W".repeat(37), "W".repeat(37), "W".repeat(37), "W".repeat(37), "W".repeat(37)].join("\n"),
+    });
+    const base = sampleInvoice();
+    const invoice = { ...base, customer: { ...base.customer, ...input } };
+    const pdf = text(renderInvoicePdf({ organizationName: "A", invoice }));
+    const strings = shown(pdf);
+    expect(strings.some((s) => s.endsWith("…") || s.includes("\x85"))).toBe(false);
+    expect(strings.join("")).toContain("W".repeat(200).slice(0, 20));
+    // Nothing of the block below the table header on page 1, and the header itself on the page.
+    const header = /\/F2 9 Tf [\d.]+ g 50\.00 (-?[\d.]+) Td \(Description\) Tj/.exec(pdf)!;
+    expect(Number(header[1])).toBeGreaterThan(100);
+    expect(structure(pdf).pages).toBe(1);
+  });
+});
+
 describe("text encoding", () => {
   it("escapes the three characters PDF strings reserve", () => {
     expect(pdfString("a (b) \\c")).toBe("(a \\(b\\) \\\\c)");

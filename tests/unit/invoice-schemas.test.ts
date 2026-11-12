@@ -32,6 +32,8 @@ describe("customerInput", () => {
     ["an address of seven lines", { name: "N", email: "n@example.com", address: "1\n2\n3\n4\n5\n6\n7" }, "address"],
     ["a right-to-left override in the name", { name: "Invoice \u202egnp.exe", email: "n@example.com", address: "" }, "name"],
     ["an isolate in the address", { name: "N", email: "n@example.com", address: "a\u2066b" }, "address"],
+    ["a right-to-left mark in the name", { name: "a\u200f100 200\u200f", email: "n@example.com", address: "" }, "name"],
+    ["an address that wraps past what the invoice prints", { name: "N", email: "n@example.com", address: Array.from({ length: 6 }, () => "W".repeat(70)).join("\n") }, "address"],
   ])("refuses %s", (_, input, field) => {
     const result = customerInput.safeParse(input);
     expect(result.success).toBe(false);

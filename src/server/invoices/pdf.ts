@@ -12,7 +12,9 @@ const PAGE = { width: 612, height: 792 }; // US Letter, in points
 const MARGIN = 50;
 const RIGHT = PAGE.width - MARGIN;
 const GAP = 14; // between table columns
-const BILL_TO_WIDTH = 260;
+/** The bill-to block's width and how many address lines it prints (schemas.ts validates against the same). */
+export const BILL_TO_WIDTH = 260;
+export const BILL_TO_ADDRESS_LINES = 12;
 
 // Helvetica's advance widths (thousandths of the font size) for ASCII 32-126, from its AFM file. Other
 // characters use OTHER_WIDTHS, or 556 (a digit's width, close for the accented letters WinAnsi has).
@@ -129,7 +131,14 @@ export function wrap(text: string, size: number, width: number, font: Font = "F1
       }
       if (current !== "") lines.push(current);
       let rest = graphemes(word);
-      while (rest.length > 1 && textWidth(rest.join(""), size, font) > width) {
+      while (textWidth(rest.join(""), size, font) > width) {
+        // A single cluster wider than the line (a letter with dozens of combining marks is one cluster): only
+        // then is it cut by code point (review round 3: one such name ran to x = 1058 on a 612 pt page).
+        if (textWidth(rest[0]!, size, font) > width && Array.from(rest[0]!).length > 1) {
+          rest = [...Array.from(rest[0]!), ...rest.slice(1)];
+          continue;
+        }
+        if (rest.length === 1) break; // one code point wider than the line: nothing smaller to cut
         let cut = rest.length - 1;
         while (cut > 1 && textWidth(rest.slice(0, cut).join(""), size, font) > width) cut--;
         lines.push(rest.slice(0, cut).join(""));
@@ -256,17 +265,21 @@ export function renderInvoicePdf({ organizationName, invoice }: PdfInput): Uint8
     y -= 14;
   }
   // Bill to, in a column clear of the facts: every part wrapped to it, and capped so the block always fits on
-  // the first page (3 lines of name, 2 of email, 6 of address; an ellipsis marks a cut).
+  // the first page (an ellipsis marks a cut). The caps are what valid input can wrap to at worst (a 200-character
+  // name in bold, a 254-character email of its widest character, an address the schema accepts), so nothing
+  // the forms accept is ever cut; they only bound data that skipped validation.
   let billY = factsTop;
   page.text(MARGIN, billY, "Bill to", 9, "F1", 0.4);
   billY -= 14;
-  for (const nameLine of clip(wrap(invoice.customer.name, 11, BILL_TO_WIDTH, "F2"), 3, 11, BILL_TO_WIDTH, "F2")) {
+  for (const nameLine of clip(wrap(invoice.customer.name, 11, BILL_TO_WIDTH, "F2"), 9, 11, BILL_TO_WIDTH, "F2")) {
     page.text(MARGIN, billY, nameLine, 11, "F2");
     billY -= 14;
   }
   const contact = [
-    ...clip(wrap(invoice.customer.email, 10, BILL_TO_WIDTH), 2, 10, BILL_TO_WIDTH),
-    ...(invoice.customer.address ? clip(wrap(invoice.customer.address, 10, BILL_TO_WIDTH), 6, 10, BILL_TO_WIDTH) : []),
+    ...clip(wrap(invoice.customer.email, 10, BILL_TO_WIDTH), 11, 10, BILL_TO_WIDTH),
+    ...(invoice.customer.address
+      ? clip(wrap(invoice.customer.address, 10, BILL_TO_WIDTH), BILL_TO_ADDRESS_LINES, 10, BILL_TO_WIDTH)
+      : []),
   ];
   for (const contactLine of contact) {
     page.text(MARGIN, billY, contactLine, 10);

@@ -20,13 +20,21 @@ export const newPassword = z
 // place in a name shown on invoices.
 const CONTROL = /\p{Cc}/u;
 
+/**
+ * Characters that change the order text is displayed in, without being visible: the embeddings, overrides and
+ * isolates, and the zero-width direction marks (LRM, RLM, ALM), with which "100 200" can display as "200 100".
+ * Refused in every name and text field shown on invoices (reviews of day 2; the organization name was missed
+ * at first).
+ */
+export const BIDI_CONTROL = /[\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/u;
+
 const name = (what: string) =>
   z
     .string()
     .trim()
     .min(1, `Enter ${what}.`)
     .max(100, `Use at most 100 characters for ${what}.`)
-    .refine((value) => !CONTROL.test(value), `Remove control characters from ${what}.`);
+    .refine((value) => !CONTROL.test(value) && !BIDI_CONTROL.test(value), `Remove control characters from ${what}.`);
 
 export const signUpInput = z.object({
   name: name("your name"),

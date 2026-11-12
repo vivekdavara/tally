@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { email } from "@/server/auth/schemas";
+import { BIDI_CONTROL, email } from "@/server/auth/schemas";
 import {
   isCurrency,
   MoneyInputError,
@@ -8,6 +8,7 @@ import {
   parseUnitPrice,
   type Currency,
 } from "./money";
+import { BILL_TO_ADDRESS_LINES, BILL_TO_WIDTH, wrap } from "./pdf";
 
 // Inputs for customers, invoices and lines. Money fields arrive as the text the user typed and are parsed
 // exactly here (money.ts); nothing is converted to a JavaScript number on the way.
@@ -15,10 +16,8 @@ import {
 const CONTROL = /\p{Cc}/u;
 // Multi-line fields keep line breaks (as \n) and refuse every other control character.
 const CONTROL_EXCEPT_NEWLINE = /[^\P{Cc}\n]/u;
-// Bidirectional embeddings, overrides and isolates: they make text display in a different order from the one
-// stored ("Trojan Source"), which on an invoice could make a name or an amount in a description read as
-// something else (review of day 2).
-const BIDI_CONTROL = /[\u202a-\u202e\u2066-\u2069]/u;
+// BIDI_CONTROL (auth/schemas.ts): characters that make text display in a different order from the one stored
+// ("Trojan Source"), which on an invoice could make a name or an amount in a description read as something else.
 
 const line = (what: string, max: number) =>
   z
@@ -44,8 +43,13 @@ const multiline = (what: string, max: number, maxLines = 20) =>
 export const customerInput = z.object({
   name: line("a name", 200),
   email,
-  // Six lines: what the PDF's bill-to block prints (src/server/invoices/pdf.ts).
-  address: multiline("the address", 500, 6),
+  // Six lines as typed, and no more than the PDF's bill-to block prints once it wraps them, so whatever is
+  // accepted appears in full on the invoice (review round 3: counting only line breaks let a long first line
+  // push the country off).
+  address: multiline("the address", 500, 6).refine(
+    (value) => value === null || wrap(value, 10, BILL_TO_WIDTH).length <= BILL_TO_ADDRESS_LINES,
+    "Shorten the address's lines: it won't fit on the invoice.",
+  ),
 });
 export type CustomerInput = z.infer<typeof customerInput>;
 
