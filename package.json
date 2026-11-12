@@ -19,6 +19,7 @@
     "e2e": "playwright test",
     "bench": "tsx scripts/bench-tenant.ts",
     "bench:signin": "tsx scripts/bench-signin.ts",
+    "bench:finalize": "tsx scripts/bench-finalize.ts",
     "db:setup": "scripts/db-setup.sh",
     "db:migrate": "prisma migrate deploy",
     "check": "npm run typecheck && npm run lint && npm test"

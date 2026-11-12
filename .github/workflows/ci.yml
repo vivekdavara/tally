@@ -60,6 +60,7 @@ jobs:
           scripts/db-setup.sh tally_bench
           npm run bench
           npm run bench:signin
+          BENCH_FINALIZATIONS=50 BENCH_CONCURRENCY=1,4 BENCH_OUT=$RUNNER_TEMP/bench-finalize.json npm run bench:finalize
 
   e2e:
     name: e2e (chrome)
