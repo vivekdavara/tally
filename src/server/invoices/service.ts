@@ -140,7 +140,11 @@ export async function getInvoice(tx: TenantTx, id: string): Promise<InvoiceView 
     issuedAt: row.issuedAt,
     dueOn: row.dueOn,
     createdAt: row.createdAt,
-    customer: row.customer,
+    // A final invoice shows who it was issued to (copied at finalization), not the customer as edited since.
+    customer:
+      row.status === "DRAFT"
+        ? row.customer
+        : { id: row.customer.id, name: row.billToName!, email: row.billToEmail!, address: row.billToAddress },
     lines: row.lines.map((l, i) => ({ ...l, ...inputs[i]!, amount: totals.lineAmounts[i]! })),
     totals,
   };
@@ -172,7 +176,7 @@ export async function listInvoices(tx: TenantTx, take = 100): Promise<InvoiceSum
     number: row.number,
     status: row.status,
     currency: row.currency as Currency,
-    customerName: row.customer.name,
+    customerName: row.billToName ?? row.customer.name,
     total: row.totalMinor ?? computeTotals(toLineInputs(row.lines)).total,
     dueOn: row.dueOn,
     createdAt: row.createdAt,

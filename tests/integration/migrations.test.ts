@@ -111,7 +111,7 @@ describe("invoices and lines", () => {
           for (const row of rows) {
             await tx.$executeRawUnsafe(
               `INSERT INTO invoices (organization_id, customer_id, currency, status, number, issued_at, due_on,
-                                     subtotal_minor, tax_minor, total_minor)
+                                     subtotal_minor, tax_minor, total_minor, bill_to_name, bill_to_email)
                VALUES ($1::uuid, $2::uuid, 'USD', ${row})`,
               orgId,
               customerId,
@@ -123,15 +123,18 @@ describe("invoices and lines", () => {
         await admin.$disconnect();
       }
     }
-    const final = "now(), current_date, 100, 0, 100";
+    const billTo = "'N', 'n@example.com'";
+    const final = `now(), current_date, 100, 0, 100, ${billTo}`;
 
     it.each([
-      ["a draft with a number", `'DRAFT', 7, NULL, NULL, NULL, NULL, NULL`, /invoices_number_when_final/],
+      ["a draft with a number", `'DRAFT', 7, NULL, NULL, NULL, NULL, NULL, NULL, NULL`, /invoices_number_when_final/],
       ["an open invoice without a number", `'OPEN', NULL, ${final}`, /invoices_number_when_final/],
       ["a zero number", `'PAID', 0, ${final}`, /invoices_number_positive/],
-      ["an open invoice without totals", `'OPEN', 1, now(), current_date, NULL, NULL, NULL`, /invoices_final_fields/],
-      ["a draft with totals", `'DRAFT', NULL, NULL, NULL, 1, 0, 1`, /invoices_final_fields/],
-      ["a total that doesn't add up", `'OPEN', 1, now(), current_date, 100, 10, 111`, /invoices_total_adds_up/],
+      ["an open invoice without totals", `'OPEN', 1, now(), current_date, NULL, NULL, NULL, ${billTo}`, /invoices_final_fields/],
+      ["a draft with totals", `'DRAFT', NULL, NULL, NULL, 1, 0, 1, NULL, NULL`, /invoices_final_fields/],
+      ["a total that doesn't add up", `'OPEN', 1, now(), current_date, 100, 10, 111, ${billTo}`, /invoices_total_adds_up/],
+      ["an open invoice without a bill-to", `'OPEN', 1, now(), current_date, 100, 0, 100, NULL, NULL`, /invoices_bill_to_when_final/],
+      ["a draft with a bill-to", `'DRAFT', NULL, NULL, NULL, NULL, NULL, NULL, ${billTo}`, /invoices_bill_to_when_final/],
     ])("refuse %s", async (_, row, constraint) => {
       await expect(insertWithoutTriggers([row])).rejects.toThrow(constraint);
     });

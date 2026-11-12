@@ -61,10 +61,10 @@ export const FORBIDDEN: { table: string; privilege: string; column?: string }[] 
   { table: "users", privilege: "UPDATE", column: "*" },
   { table: "organizations", privilege: "UPDATE", column: "*" },
   ...RLS_TABLES.map((table) => ({ table, privilege: "UPDATE", column: "organization_id" })),
-  // Invoices (migrations/*_invoicing): the number, issue time and totals are written only by the
-  // invoices_guard trigger at finalization; a number the application chose could skip or repeat, a total it
-  // wrote could disagree with the lines. The currency is fixed at creation (prices are in its minor unit).
-  ...["number", "issued_at", "subtotal_minor", "tax_minor", "total_minor"].flatMap((column) => [
+  // Invoices (migrations/*_invoicing, *_bill_to_snapshot): the number, issue time, totals and bill-to details
+  // are written only by the invoices_guard trigger at finalization; a number the application chose could skip
+  // or repeat, a total it wrote could disagree with the lines, a bill-to it wrote could misaddress the invoice. The currency is fixed at creation (prices are in its minor unit).
+  ...["number", "issued_at", "subtotal_minor", "tax_minor", "total_minor", "bill_to_name", "bill_to_email", "bill_to_address"].flatMap((column) => [
     { table: "invoices", privilege: "INSERT", column },
     { table: "invoices", privilege: "UPDATE", column },
   ]),

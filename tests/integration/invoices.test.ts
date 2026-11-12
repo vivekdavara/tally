@@ -391,3 +391,33 @@ describe("customers", () => {
     expect(await a.run((tx) => getCustomer(tx, "not-a-uuid"))).toBeNull();
   });
 });
+
+describe("a final invoice's bill-to details", () => {
+  it("stay as the customer was at finalization; a draft shows the customer as it is", async () => {
+    const org = await newOrg();
+    const issued = await draftWithLines(org);
+    const before = (await org.run((tx) => getCustomer(tx, org.customerId)))!;
+    value(await org.run((tx) => finalize(tx, issued, 0)));
+    const draft = await draftWithLines(org);
+    const renamed = { name: "Renamed Ltd", email: `renamed-${unique()}@example.com`, address: "2 New Rd" };
+    value(await org.run((tx) => updateCustomer(tx, org.customerId, renamed)));
+
+    const final = (await org.run((tx) => getInvoice(tx, issued)))!;
+    expect(final.customer).toEqual({ id: org.customerId, name: before.name, email: before.email, address: before.address });
+    expect((await org.run((tx) => getInvoice(tx, draft)))!.customer).toMatchObject(renamed);
+    const listed = await org.run((tx) => listInvoices(tx));
+    expect(listed.find((i) => i.id === issued)!.customerName).toBe(before.name);
+    expect(listed.find((i) => i.id === draft)!.customerName).toBe("Renamed Ltd");
+  });
+
+  it("can't be written by the application, nor changed by anyone once final", async () => {
+    const org = await newOrg();
+    const id = await draftWithLines(org);
+    // A draft: no grant, so the application can't pre-fill them either.
+    await expect(org.run((tx) => tx.$executeRaw`UPDATE invoices SET bill_to_name = 'Someone else' WHERE id = ${id}::uuid`)).rejects.toThrow(/permission denied/);
+    value(await org.run((tx) => finalize(tx, id, 0)));
+    await expect(org.run((tx) => tx.$executeRaw`UPDATE invoices SET bill_to_name = 'Someone else' WHERE id = ${id}::uuid`)).rejects.toThrow(/permission denied/);
+    // Even a superuser (all privileges, no row-level security) meets the trigger.
+    await expect(admin.$executeRaw`UPDATE invoices SET bill_to_address = 'Elsewhere' WHERE id = ${id}::uuid`).rejects.toThrow(/TL006|only its status can change/);
+  });
+});

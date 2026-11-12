@@ -164,6 +164,10 @@ describe("the role check against Postgres", () => {
     ["INSERT", "total_minor"],
     ["UPDATE", "total_minor"],
     ["UPDATE", "currency"],
+    ["INSERT", "bill_to_name"],
+    ["UPDATE", "bill_to_name"],
+    ["UPDATE", "bill_to_email"],
+    ["UPDATE", "bill_to_address"],
   ])("sees %s (%s) on invoices, one grant at a time", async (privilege, column) => {
     const facts = await factsAfter([`GRANT ${privilege} (${column}) ON invoices TO tally_app`], "tally_app");
     expect(facts.forbiddenPrivileges).toEqual([`${privilege} (${column}) on invoices`]);
