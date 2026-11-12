@@ -119,6 +119,9 @@ describe("withTenant and writes that outlive its transaction", () => {
     ).catch(() => undefined);
     await sleep(50);
     let started: Promise<unknown> | undefined;
+    // Kept (not swallowed) so a failure says why the unawaited write failed: on 2026-11-12 this test failed once
+    // with 25P02 at withTenant's SELECT 1, i.e. the write itself had failed, and its error was lost.
+    let startedError: unknown;
     await withTenant(
       tenantId,
       async (tx) => {
@@ -137,10 +140,14 @@ describe("withTenant and writes that outlive its transaction", () => {
             },
           },
         });
-        void started.then(undefined, () => undefined);
+        void started.then(undefined, (error: unknown) => {
+          startedError = error;
+        });
       },
       app,
-    );
+    ).catch((error: unknown) => {
+      throw new Error(`withTenant failed (${String(error).slice(0, 200)}); the unawaited write failed with: ${String(startedError).slice(0, 500)}`);
+    });
     await started?.catch(() => undefined);
     await holder;
     await sleep(200);
