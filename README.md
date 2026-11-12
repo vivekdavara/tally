@@ -191,6 +191,37 @@ All measured on an Apple M3 laptop (macOS 26.6.2, Node 23.11, Postgres 14.20), o
 
 ## Review
 
+### Day 2
+
+A review agent at `0eff04c` (its own worktree and database, 11 minutes, findings as failing tests in
+`tests/review-d2/`), every finding reproduced here before fixing:
+
+- **The invoice counter was writable by the application.** `invoices_guard` runs as the caller, so the role needs
+  `INSERT`/`UPDATE` on `invoice_counters`, and any statement could use them: `+41` made the next invoice number 43.
+  Fixed with a guard trigger that accepts counter writes only from inside another trigger, one step at a time.
+- **Temporary tables could shadow the triggers' tables** (`search_path` without `pg_temp` searches it first): with a
+  `TEMP` grant, finalization stored a total of 1 for a real 100,000. The application has no `TEMP`, so latent; fixed by
+  listing `pg_temp` last, and the role check now refuses `TEMP`/`CREATE` and missing or disabled guard triggers.
+- **A line could move out of a final invoice** with an `UPDATE (invoice_id)` grant (not granted; latent). The
+  trigger now refuses any change of a line's invoice, and the role check forbids the grant.
+- **PDF text off the page or overlapping:** 100 tax rates pushed the Total below the page; a 60-line address pushed
+  the table off page 1; a 200-character name ran to x = 1,220 on a 612 pt page; at the input limits the amount
+  overlapped the Tax column. The old margin test couldn't see any of it (its regex skipped negative coordinates).
+- Its suspicions, each confirmed by a test of mine and fixed: an issued invoice showed the customer's *current*
+  details (now copied at finalization); a customer deleted mid-request made a draft's creation a 500 (now "no
+  customer"); bidirectional override characters were accepted in names and descriptions (now refused).
+
+Round 2 ran on the fixes; see below.
+
+Found by my own tests on day 2: the issue time was taken before the number (so #N+1 could be stamped earlier than #N);
+a duplicate customer email was a 500, because the service caught the unique violation inside a transaction Postgres
+had already aborted; bold text was measured with regular widths (the "Amount" header overran the margin). One
+unexplained failure: `tests/review2/orphan-writes.test.ts`'s unawaited-write test failed once with 25P02 during a
+full run while the review agent was running tests on the same cluster; it passed 5 of 5 alone and in every full run
+since. Its error is swallowed by design, so the cause isn't known.
+
+### Day 1
+
 Two review rounds by a separate agent, each reviewing a fixed commit in its own worktree and database, writing every
 finding as a failing test (`tests/review/`).
 

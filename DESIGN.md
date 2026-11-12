@@ -272,9 +272,32 @@ The database enforces it for every writer, not just the services (`invoices_guar
 DELETE` trigger): a new invoice is a draft; a draft can only be edited, finalized or deleted; once out of draft
 nothing but the status changes, and only OPEN → PAID or OPEN → VOID; only drafts can be deleted (a deleted numbered
 invoice would be a gap), except inside the organization's own deletion cascade. `invoice_lines_guard` lets lines change
-only while their invoice is a draft and caps them at 100. The currency is fixed at creation, because prices are stored
-in its minor unit. The triggers raise their own SQLSTATEs (`TL001`-`TL009`), which `refusals()` in the services maps
+only while their invoice is a draft, never moves a line to another invoice, and caps lines at 100. The currency is fixed at creation, because prices are stored
+in its minor unit. The triggers raise their own SQLSTATEs (`TL001`-`TL010`), which `refusals()` in the services maps
 to the same results the services' own checks return.
+
+`refusals()` wraps a whole `run(...)`, never a call inside it: a refused statement has aborted the transaction, so
+the error has to reach `withTenant` (which rolls back) before it becomes a result. It also maps the unique key
+`(organization_id, email)` on customers to "email-taken" (the first version caught that inside the transaction and
+was a 500), and, per call, the foreign key from invoices to customers: "has-invoices" for a delete, "no-customer" for
+a draft whose customer was deleted between the service's check and its write.
+
+### Bill-to details
+
+A finalized invoice keeps who it was issued to: the trigger copies the customer's name, email and address into
+`bill_to_name`, `bill_to_email`, `bill_to_address` at finalization, and they are frozen with everything else.
+Before, an issued invoice's page and PDF followed later edits to the customer (review round 1's suspicion, confirmed
+by a test). A draft still shows the customer as it is. The organization's own name isn't snapshotted yet: nothing
+can rename an organization today (day 4's settings page will have to).
+
+### Trigger functions and `search_path`
+
+The functions are `SECURITY INVOKER` with `SET search_path = pg_catalog, public, pg_temp`. Postgres searches the
+session's temporary schema *first* for tables unless `pg_temp` is listed, so with the first version's `pg_catalog,
+public`, a session allowed to create temporary tables could shadow `invoice_lines` and make finalization total a fake
+line (review round 1, shown with a `TEMP` grant the application doesn't have). Listed last, it's searched last. The
+role check refuses `TEMP` and `CREATE` on the database and `CREATE` on schema `public`, and requires the three guard
+triggers to exist and fire for ordinary sessions.
 
 ### Numbering: gapless, per organization
 
@@ -298,6 +321,13 @@ The issue time is taken *after* the number, while the counter is still locked, s
 against numbers (the first version took it before, and the concurrency test caught #N+1 stamped earlier than #N). The
 application has no privilege on `number`, `issued_at` or the totals at all; the role check refuses to start if it
 ever gets one.
+
+The counter itself needs `INSERT` and `UPDATE` grants for the application role, because `invoices_guard` runs as the
+caller (a `SECURITY DEFINER` function would run as its owner, who could bypass RLS; the role check refuses those). So
+review round 1 could move it directly (`UPDATE invoice_counters SET last_number = last_number + 41` made the next
+invoice 43). `invoice_counters_guard` closes that: a write is accepted only from inside another trigger
+(`pg_trigger_depth() > 1`; the application role can't create triggers, so that's `invoices_guard`), an insert must
+start at 1 and an update must add exactly 1.
 
 ### Stored totals
 
@@ -323,7 +353,10 @@ built-in Helvetica covers without embedding a font, and under 300 lines with no 
 than a library. Text is encoded as Windows-1252 (WinAnsiEncoding), so Latin text, €, dashes and curly quotes print;
 other scripts print as "?" (supporting them means embedding a TrueType subset, which is when a library like pdf-lib
 earns its place). Right alignment uses Helvetica's AFM widths. Long descriptions wrap; long invoices break across
-pages with the table header repeated; drafts say they're drafts on every page. The output is deterministic. The route
+pages with the table header repeated, and the totals block checks for room row by row (up to 100 tax rates is longer
+than a page); the bill-to block wraps to its column and is capped (3 lines of name, 2 of email, the 6 lines an address
+may have); columns are sized to their widest cell, so even the largest amounts the limits allow don't overlap (an
+ordinary invoice keeps the default widths); drafts say they're drafts on every page. The output is deterministic. The route
 is `GET /o/<slug>/invoices/<id>/pdf`, through `requireTenant`, `Cache-Control: private, no-store`.
 
 ## Architecture
