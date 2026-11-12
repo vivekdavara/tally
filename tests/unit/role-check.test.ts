@@ -13,6 +13,8 @@ const safe: RoleFacts = {
   policyProblems: [],
   forbiddenPrivileges: [],
   presetTenant: null,
+  creationPrivileges: [],
+  missingTriggers: [],
 };
 
 describe("roleProblems", () => {

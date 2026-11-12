@@ -49,6 +49,8 @@ describe("the role check against Postgres", () => {
       policyProblems: [],
       forbiddenPrivileges: [],
       presetTenant: null,
+      creationPrivileges: [],
+      missingTriggers: [],
     });
     await expect(assertSafeAppRole(app)).resolves.toBeUndefined();
   });
@@ -175,6 +177,26 @@ describe("the role check against Postgres", () => {
   it("sees a policy added to invoice_counters", async () => {
     const facts = await factsAfter(["CREATE POLICY wide_open ON invoice_counters USING (true)"], "tally_app");
     expect(facts.policyProblems).toEqual(["unexpected policy wide_open on invoice_counters"]);
+  });
+
+  it.each([
+    ["invoices", "invoices_guard"],
+    ["invoice_lines", "invoice_lines_guard"],
+    ["invoice_counters", "invoice_counters_guard"],
+  ])("sees the %s trigger %s disabled or dropped", async (table, trigger) => {
+    expect((await factsAfter([`ALTER TABLE ${table} DISABLE TRIGGER ${trigger}`], "tally_app")).missingTriggers).toEqual([`${table}.${trigger}`]);
+    expect((await factsAfter([`DROP TRIGGER ${trigger} ON ${table}`], "tally_app")).missingTriggers).toEqual([`${table}.${trigger}`]);
+    // Set to fire only under session_replication_role = replica: not for ordinary sessions.
+    expect((await factsAfter([`ALTER TABLE ${table} ENABLE REPLICA TRIGGER ${trigger}`], "tally_app")).missingTriggers).toEqual([`${table}.${trigger}`]);
+  });
+
+  it("sees a role that may create objects in the database or schema public", async () => {
+    const facts = await factsAfter(
+      ["GRANT CREATE ON SCHEMA public TO tally_app", "DO $$ BEGIN EXECUTE format('GRANT CREATE, TEMP ON DATABASE %I TO tally_app', current_database()); END $$"],
+      "tally_app",
+    );
+    expect(facts.creationPrivileges).toEqual(["CREATE on schema public", "CREATE on the database", "TEMP on the database"]);
+    expect(roleProblems(facts).join("; ")).toMatch(/may create objects/);
   });
 
   it("sees a connection that starts with a tenant already set", async () => {

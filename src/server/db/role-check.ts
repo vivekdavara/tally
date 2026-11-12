@@ -71,6 +71,19 @@ export const FORBIDDEN: { table: string; privilege: string; column?: string }[] 
   { table: "invoices", privilege: "UPDATE", column: "currency" },
   // Deleting the counter would restart numbering at 1.
   { table: "invoice_counters", privilege: "DELETE" },
+  // Moving a line between invoices (review of day 2; the trigger refuses it too).
+  { table: "invoice_lines", privilege: "UPDATE", column: "invoice_id" },
+];
+
+/**
+ * The triggers that enforce the invoice life cycle and numbering (migrations/*_invoicing, *_review_d2). Each must
+ * exist and fire for ordinary sessions (tgenabled 'O'); one disabled or dropped would let any writer break the
+ * numbering or change a final invoice.
+ */
+export const EXPECTED_TRIGGERS: { table: string; name: string }[] = [
+  { table: "invoices", name: "invoices_guard" },
+  { table: "invoice_lines", name: "invoice_lines_guard" },
+  { table: "invoice_counters", name: "invoice_counters_guard" },
 ];
 
 export interface RoleFacts {
@@ -97,6 +110,13 @@ export interface RoleFacts {
   forbiddenPrivileges: string[];
   /** app.organization_id as the connection found it ('' and null both mean unset). */
   presetTenant: string | null;
+  /**
+   * TEMP or CREATE on the database, CREATE on schema public: objects of its own (a temporary table shadows a
+   * public one by name) are how a role would change what the triggers' queries see (review of day 2).
+   */
+  creationPrivileges: string[];
+  /** EXPECTED_TRIGGERS that are missing or not firing for ordinary sessions. */
+  missingTriggers: string[];
 }
 
 /**
@@ -129,6 +149,12 @@ export function roleProblems(facts: RoleFacts): string[] {
   if (facts.presetTenant) {
     problems.push(`connections start with app.organization_id already set (${facts.presetTenant})`);
   }
+  if (facts.creationPrivileges.length > 0) {
+    problems.push(`${facts.role} may create objects: ${facts.creationPrivileges.join(", ")}`);
+  }
+  if (facts.missingTriggers.length > 0) {
+    problems.push(`invoice triggers missing or disabled: ${facts.missingTriggers.join(", ")}`);
+  }
   return problems;
 }
 
@@ -156,6 +182,8 @@ export async function readRoleFacts(client: Pick<Db, "$queryRaw">): Promise<Role
   const forbiddenTables = FORBIDDEN.map((f) => f.table);
   const forbiddenPrivileges = FORBIDDEN.map((f) => f.privilege);
   const forbiddenColumns = FORBIDDEN.map((f) => f.column ?? "");
+  const triggerTables = EXPECTED_TRIGGERS.map((t) => t.table);
+  const triggerNames = EXPECTED_TRIGGERS.map((t) => t.name);
   const rows = await client.$queryRaw<
     {
       role: string;
@@ -168,6 +196,8 @@ export async function readRoleFacts(client: Pick<Db, "$queryRaw">): Promise<Role
       unprotected: string[];
       held: string[];
       preset: string | null;
+      creation: string[];
+      missing_triggers: string[];
     }[]
   >`
     SELECT r.rolname::text AS role,
@@ -200,7 +230,18 @@ export async function readRoleFacts(client: Pick<Db, "$queryRaw">): Promise<Role
                             WHEN f.col = '*' THEN has_any_column_privilege(r.oid, ('public.' || f.tbl)::regclass, f.priv)
                             ELSE has_column_privilege(r.oid, ('public.' || f.tbl)::regclass, f.col, f.priv) END
                  ORDER BY 1) AS held,
-           NULLIF(current_setting('app.organization_id', true), '') AS preset
+           NULLIF(current_setting('app.organization_id', true), '') AS preset,
+           ARRAY(SELECT v.p FROM (VALUES
+                   ('TEMP on the database', has_database_privilege(r.oid, current_database(), 'TEMP')),
+                   ('CREATE on the database', has_database_privilege(r.oid, current_database(), 'CREATE')),
+                   ('CREATE on schema public', has_schema_privilege(r.oid, 'public', 'CREATE'))) AS v(p, held)
+                 WHERE v.held ORDER BY 1) AS creation,
+           ARRAY(SELECT e.tbl || '.' || e.name FROM unnest(${triggerTables}::text[], ${triggerNames}::text[]) AS e(tbl, name)
+                 WHERE NOT EXISTS (SELECT 1 FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid
+                                   JOIN pg_namespace n ON n.oid = c.relnamespace
+                                   WHERE n.nspname = 'public' AND c.relname = e.tbl AND t.tgname = e.name
+                                     AND t.tgenabled = 'O')
+                 ORDER BY 1) AS missing_triggers
     FROM pg_roles r
     WHERE r.rolname = current_user`;
   const row = rows[0];
@@ -233,6 +274,8 @@ export async function readRoleFacts(client: Pick<Db, "$queryRaw">): Promise<Role
     policyProblems,
     forbiddenPrivileges: row.held,
     presetTenant: row.preset,
+    creationPrivileges: row.creation,
+    missingTriggers: row.missing_triggers,
   };
 }
 

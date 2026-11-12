@@ -312,6 +312,7 @@ export const TRIGGER_REASONS: Record<string, string> = {
   TL007: "not-open",
   TL008: "final",
   TL009: "too-many-lines",
+  TL010: "numbering",
 };
 
 /**
