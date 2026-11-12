@@ -323,7 +323,8 @@ application has no privilege on `number`, `issued_at` or the totals at all; the 
 ever gets one.
 
 The counter itself needs `INSERT` and `UPDATE` grants for the application role, because `invoices_guard` runs as the
-caller (a `SECURITY DEFINER` function would run as its owner, who could bypass RLS; the role check refuses those). So
+caller (a `SECURITY DEFINER` function would run with all its owner's privileges, outside the column grants; the role
+check refuses any the application can execute). So
 review round 1 could move it directly (`UPDATE invoice_counters SET last_number = last_number + 41` made the next
 invoice 43). `invoice_counters_guard` closes that: a write is accepted only from inside another trigger
 (`pg_trigger_depth() > 1`; the application role can't create triggers, so that's `invoices_guard`), an insert must

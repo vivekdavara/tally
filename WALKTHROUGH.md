@@ -291,9 +291,11 @@ out of a final invoice), fixed anyway and added to the startup role check, so a 
 loudly. And the PDF writer drew text off the page for inputs the validation allows (`tests/review-d2/`).
 
 **Why not make the counter function `SECURITY DEFINER`, so the app needs no grant on the counter at all?**
-A definer function runs as its owner, and the owner of these tables can bypass row-level security unless every
-statement inside is written with that in mind. D1's role check refuses to start if the app can execute any definer
-function, a deliberately blunt rule, and a trigger-depth guard keeps it.
+A definer function runs with its owner's privileges: on these tables that's everything, far beyond the column grants
+the application is held to, so any bug in such a function (or in how it resolves names) is a hole the grants no longer
+cover. (Row-level security still applies, since the tables force it even for their owner.) D1's role check refuses to
+start if the app can execute any definer function, a deliberately blunt rule, and the trigger-depth guard lets me
+keep it.
 
 **Why copy the customer's details onto a finalized invoice?**
 An issued invoice is a document that was sent; if renaming a customer changed it, the PDF you'd regenerate for an
