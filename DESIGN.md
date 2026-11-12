@@ -457,8 +457,9 @@ the same reason. The app listens on port 8117. Tests use a separate database, `t
   lock, then refused; another organization's ids behave like missing ones; the PDF's structure (every xref offset),
   text, pagination and encoding; e2e: a draft finalized to INV-0001 with a hand-checked total, its PDF, and 404s
   across organizations.
-- **Review tests (`tests/review/`):** each finding of the review rounds, as the reviewer wrote it (adapted where a
-  later fix changed the setup), so the bug can't come back unnoticed.
+- **Review tests (`tests/review/`, `tests/review2/` for day 1; `tests/review-d2/`, `tests/review-d2r2/`, ... for day 2):**
+  each finding of the review rounds, as the reviewer wrote it (its setup adapted where a later fix changed it, never
+  its assertion's intent; a comment marks each adaptation), so the bug can't come back unnoticed.
 - Test files run one at a time: the role-check tests run DDL in transactions that roll back, which takes exclusive
   locks other files' writes would wait on (a deadlock once, when they ran in parallel).
 - **CI (GitHub Actions):** a Postgres 14 service container; `npm ci`, the setup script, migrations, typecheck, lint,
