@@ -42,7 +42,8 @@ describe("text with wide Latin-1 letters is measured as if it were digits", () =
     const organizationName = "ÖÜÖÜÖÜÖÜÖÜÖÜÖÜÖÜÖÜÖÜÖÜÖÜÖÜÖÜÖÜÖÜÖÜÖÜÖÜ ÖÜÖÜÖÜÖÜÖÜÖÜÖÜÖÜÖÜÖÜÖÜÖÜÖÜÖÜÖÜÖÜÖÜÖÜÖÜÖÜÖ";
     const all = placements(text(renderInvoicePdf({ organizationName, invoice: sampleInvoice() })));
     const title = all.find((p) => p.s === "INVOICE" && p.size === 18)!;
-    const nameLines = all.filter((p) => p.size === 18 && p.font === "F2" && p !== title);
+    // (Adapted after review round 4: a name that needs more than two lines at 18 pt is set at 12 pt.)
+    const nameLines = all.filter((p) => (p.size === 18 || p.size === 12) && p.font === "F2" && p !== title && p.y > 700);
     expect(nameLines.length).toBeGreaterThan(0);
     const overlapping = nameLines.filter((p) => p.right > title.x || p.right > 612 - 50);
     expect(overlapping.map((p) => `name line ends at ${p.right.toFixed(0)} pt; title starts at ${title.x.toFixed(0)}, page margin 562`)).toEqual([]);

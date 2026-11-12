@@ -8,7 +8,7 @@ import {
   parseUnitPrice,
   type Currency,
 } from "./money";
-import { BILL_TO_ADDRESS_LINES, BILL_TO_WIDTH, wrap } from "./pdf";
+import { BILL_TO_ADDRESS_LINES, BILL_TO_NAME_LINES, BILL_TO_WIDTH, wrap } from "./pdf";
 
 // Inputs for customers, invoices and lines. Money fields arrive as the text the user typed and are parsed
 // exactly here (money.ts); nothing is converted to a JavaScript number on the way.
@@ -41,7 +41,12 @@ const multiline = (what: string, max: number, maxLines = 20) =>
     .transform((value) => (value === "" ? null : value));
 
 export const customerInput = z.object({
-  name: line("a name", 200),
+  // No longer than the PDF's bill-to block prints in bold once wrapped (review round 4: words that don't fit two
+  // to a line waste most of each, so a 194-character name wrapped to 15 lines and was cut at 9).
+  name: line("a name", 200).refine(
+    (value) => wrap(value, 11, BILL_TO_WIDTH, "F2").length <= BILL_TO_NAME_LINES,
+    "Shorten the name: it won't fit on the invoice.",
+  ),
   email,
   // Six lines as typed, and no more than the PDF's bill-to block prints once it wraps them, so whatever is
   // accepted appears in full on the invoice (review round 3: counting only line breaks let a long first line

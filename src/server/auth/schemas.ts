@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { fitsLetterhead } from "@/server/invoices/pdf";
 
 // Every input from a form passes through one of these before it reaches the database.
 
@@ -40,7 +41,8 @@ export const signUpInput = z.object({
   name: name("your name"),
   email,
   password: newPassword,
-  organizationName: name("an organization name"),
+  // It heads every invoice: refused if it wouldn't print in full there (review round 4).
+  organizationName: name("an organization name").refine(fitsLetterhead, "Shorten the organization name: it won't fit on invoices."),
 });
 export type SignUpInput = z.infer<typeof signUpInput>;
 

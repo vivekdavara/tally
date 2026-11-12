@@ -15,6 +15,22 @@ const GAP = 14; // between table columns
 /** The bill-to block's width and how many address lines it prints (schemas.ts validates against the same). */
 export const BILL_TO_WIDTH = 260;
 export const BILL_TO_ADDRESS_LINES = 12;
+export const BILL_TO_NAME_LINES = 9;
+
+/**
+ * The letterhead's room for the organization's name, beside the wider of the two titles: two lines at 18 pt,
+ * or, for a name that needs more, four at 12 pt (review round 4: an ordinary 95-character name was cut).
+ */
+export const letterheadWidth = (): number => RIGHT - MARGIN - textWidth("DRAFT INVOICE", 18, "F2") - 20;
+const LETTERHEAD_SIZES = [
+  { size: 18, lines: 2, step: 22 },
+  { size: 12, lines: 4, step: 15 },
+] as const;
+
+/** Whether an organization name prints in full in the letterhead (sign-up refuses one that wouldn't). */
+export function fitsLetterhead(name: string): boolean {
+  return wrap(name, 12, letterheadWidth(), "F2").length <= 4;
+}
 
 // Helvetica's advance widths (thousandths of the font size) for ASCII 32-126, from its AFM file. Other
 // characters use OTHER_WIDTHS, or 556 (a digit's width, close for the accented letters WinAnsi has).
@@ -230,8 +246,12 @@ export function renderInvoicePdf({ organizationName, invoice }: PdfInput): Uint8
     pages.push(page);
     y = PAGE.height - MARGIN;
     if (kind !== "first") {
-      page.text(MARGIN, y, clip(wrap(`${organizationName} · ${label} (continued)`, 9, RIGHT - MARGIN), 1, 9, RIGHT - MARGIN)[0]!, 9, "F1", 0.4);
-      y -= 24;
+      // The full name, on as many lines as it takes (at most 3 for a name sign-up accepts).
+      for (const header of clip(wrap(`${organizationName} · ${label} (continued)`, 9, RIGHT - MARGIN), 3, 9, RIGHT - MARGIN)) {
+        page.text(MARGIN, y, header, 9, "F1", 0.4);
+        y -= 11;
+      }
+      y -= 13;
       if (kind === "table") tableHeader();
     }
   };
@@ -243,12 +263,13 @@ export function renderInvoicePdf({ organizationName, invoice }: PdfInput): Uint8
   // Letterhead: the organization's name wraps (two lines at most) beside the title.
   newPage("first");
   const title = draft ? "DRAFT INVOICE" : "INVOICE";
-  const nameWidth = RIGHT - MARGIN - textWidth(title, 18, "F2") - 20;
-  const nameLines = clip(wrap(organizationName, 18, nameWidth, "F2"), 2, 18, nameWidth, "F2");
   page.right(RIGHT, y - 4, title, 18, "F2", draft ? 0.55 : 0);
+  const nameWidth = letterheadWidth();
+  const letterhead = LETTERHEAD_SIZES.find((f) => wrap(organizationName, f.size, nameWidth, "F2").length <= f.lines) ?? LETTERHEAD_SIZES[1];
+  const nameLines = clip(wrap(organizationName, letterhead.size, nameWidth, "F2"), letterhead.lines, letterhead.size, nameWidth, "F2");
   for (const nameLine of nameLines) {
-    page.text(MARGIN, y - 4, nameLine, 18, "F2");
-    y -= 22;
+    page.text(MARGIN, y - 4, nameLine, letterhead.size, "F2");
+    y -= letterhead.step;
   }
   y -= 12;
   const facts: [string, string][] = [
@@ -271,7 +292,7 @@ export function renderInvoicePdf({ organizationName, invoice }: PdfInput): Uint8
   let billY = factsTop;
   page.text(MARGIN, billY, "Bill to", 9, "F1", 0.4);
   billY -= 14;
-  for (const nameLine of clip(wrap(invoice.customer.name, 11, BILL_TO_WIDTH, "F2"), 9, 11, BILL_TO_WIDTH, "F2")) {
+  for (const nameLine of clip(wrap(invoice.customer.name, 11, BILL_TO_WIDTH, "F2"), BILL_TO_NAME_LINES, 11, BILL_TO_WIDTH, "F2")) {
     page.text(MARGIN, billY, nameLine, 11, "F2");
     billY -= 14;
   }
