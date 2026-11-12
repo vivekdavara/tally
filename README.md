@@ -309,6 +309,8 @@ finding as a failing test (`tests/review/`).
 - PDFs use the standard Helvetica (no embedded font), so characters outside Windows-1252 print as "?" (a currency
   symbol outside it, like ₹, falls back to the ISO code in the PDF). Names and emails longer than the bill-to block's
   lines are clipped there with an ellipsis.
+- The name and address rules tightened during the day's reviews. A customer saved before them (only in test databases)
+  can fail validation when next edited, and the PDF clips such data rather than overflowing.
 - A final invoice keeps its customer's details, but not the organization's own name: nothing can rename an
   organization yet, and day 4's settings page will need to snapshot it too.
 - The due date is computed from the database's UTC date in the finalizing statement; if UTC midnight passes between
