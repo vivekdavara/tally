@@ -10,6 +10,8 @@ export const APP_TABLES = [
   "invoices",
   "invoice_lines",
   "invoice_counters",
+  "payments",
+  "stripe_events",
 ] as const;
 
 /** Tables under row-level security: the tenant tables, and memberships (writes only). */
@@ -49,8 +51,10 @@ export const FORBIDDEN: { table: string; privilege: string; column?: string }[] 
     { table, privilege: "TRIGGER" },
   ]),
   // memberships and invoice_counters have no id: their keys start with organization_id, covered below.
+  // stripe_events' id is Stripe's event id, which the application must insert (and only a signed event reaches
+  // that insert); it may never change one.
   ...APP_TABLES.filter((t) => t !== "memberships" && t !== "invoice_counters").flatMap((table) => [
-    { table, privilege: "INSERT", column: "id" },
+    ...(table === "stripe_events" ? [] : [{ table, privilege: "INSERT", column: "id" }]),
     { table, privilege: "UPDATE", column: "id" },
   ]),
   { table: "memberships", privilege: "UPDATE", column: "user_id" },
@@ -73,10 +77,21 @@ export const FORBIDDEN: { table: string; privilege: string; column?: string }[] 
   { table: "invoice_counters", privilege: "DELETE" },
   // Moving a line between invoices (review of day 2; the trigger refuses it too).
   { table: "invoice_lines", privilege: "UPDATE", column: "invoice_id" },
+  // Billing (migrations/*_billing): what a payment is for and where it is paid is written once, at creation;
+  // only its outcome changes. Neither payments nor processed events are ever deleted.
+  ...["invoice_id", "provider", "checkout_session_id", "checkout_url", "amount_minor", "currency", "expires_at"].map((column) => ({
+    table: "payments",
+    privilege: "UPDATE",
+    column,
+  })),
+  { table: "payments", privilege: "DELETE" },
+  ...["type", "payment_id", "stripe_created_at"].map((column) => ({ table: "stripe_events", privilege: "UPDATE", column })),
+  { table: "stripe_events", privilege: "DELETE" },
 ];
 
 /**
- * The triggers that enforce the invoice life cycle and numbering (migrations/*_invoicing, *_review_d2). Each must
+ * The triggers that enforce the invoice life cycle and numbering (migrations/*_invoicing, *_review_d2) and the
+ * payment life cycle (*_billing). Each must
  * exist and fire for ordinary sessions (tgenabled 'O', or 'A' for always); one disabled, dropped or set to fire
  * only for replicas would let any writer break the numbering or change a final invoice.
  */
@@ -84,6 +99,8 @@ export const EXPECTED_TRIGGERS: { table: string; name: string }[] = [
   { table: "invoices", name: "invoices_guard" },
   { table: "invoice_lines", name: "invoice_lines_guard" },
   { table: "invoice_counters", name: "invoice_counters_guard" },
+  { table: "payments", name: "payments_guard" },
+  { table: "stripe_events", name: "stripe_events_guard" },
 ];
 
 export interface RoleFacts {
@@ -159,7 +176,7 @@ export function roleProblems(facts: RoleFacts): string[] {
     problems.push(`${facts.role} may create objects: ${facts.creationPrivileges.join(", ")}`);
   }
   if (facts.missingTriggers.length > 0) {
-    problems.push(`invoice triggers missing or disabled: ${facts.missingTriggers.join(", ")}`);
+    problems.push(`guard triggers missing or disabled: ${facts.missingTriggers.join(", ")}`);
   }
   if (facts.replicationRole) {
     problems.push(`session_replication_role is ${facts.replicationRole}, so no trigger (guards, foreign keys) fires`);

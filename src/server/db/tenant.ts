@@ -2,7 +2,7 @@ import type { Prisma } from "@/generated/prisma/client";
 import { db, type Db } from "./client";
 
 /** The tables row-level security protects. tests/integration/rls.test.ts checks the database agrees. */
-export const TENANT_TABLES = ["customers", "invoices", "invoice_lines", "invoice_counters"] as const;
+export const TENANT_TABLES = ["customers", "invoices", "invoice_lines", "invoice_counters", "payments", "stripe_events"] as const;
 
 /** A transaction in which app.organization_id is set: every query in it sees one tenant's rows. */
 export type TenantTx = Prisma.TransactionClient;

@@ -29,6 +29,20 @@ enum InvoiceStatus {
   @@map("invoice_status")
 }
 
+// A payment attempt's life (DESIGN.md, "Billing"). PENDING: a checkout session exists and nobody has paid;
+// PROCESSING: the customer finished checkout with a payment method that settles later (bank debits);
+// SUCCEEDED: money arrived. FAILED and EXPIRED end an attempt without money, but a late success still
+// records (money that moved is never ignored); SUCCEEDED is final. The payments_guard trigger enforces it.
+enum PaymentStatus {
+  PENDING
+  PROCESSING
+  SUCCEEDED
+  FAILED
+  EXPIRED
+
+  @@map("payment_status")
+}
+
 // Not tenant-owned: a user can belong to several organizations. Ids are immutable everywhere (onUpdate
 // NoAction): an id change would otherwise cascade into other rows without row security.
 model User {
@@ -54,6 +68,8 @@ model Organization {
   invoices       Invoice[]
   invoiceLines   InvoiceLine[]
   invoiceCounter InvoiceCounter?
+  payments       Payment[]
+  stripeEvents   StripeEvent[]
 
   @@map("organizations")
 }
@@ -120,6 +136,7 @@ model Invoice {
   // cascade would carry invoices along if a customer's organization_id were ever changed.
   customer       Customer      @relation(fields: [organizationId, customerId], references: [organizationId, id], onDelete: NoAction, onUpdate: NoAction)
   lines          InvoiceLine[]
+  payments       Payment[]
 
   @@unique([organizationId, id])
   @@unique([organizationId, number])
@@ -158,4 +175,61 @@ model InvoiceCounter {
   organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade, onUpdate: NoAction)
 
   @@map("invoice_counters")
+}
+
+// One attempt to collect an open invoice through the payment provider: a hosted checkout session for the
+// invoice's stored total. The payments_guard trigger checks the amount and currency against the invoice when
+// the row is created and freezes everything but the outcome afterwards.
+model Payment {
+  id                String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  organizationId    String        @map("organization_id") @db.Uuid
+  invoiceId         String        @map("invoice_id") @db.Uuid
+  // "mock" or "stripe": which provider created the session (a mock session can't be paid on Stripe).
+  provider          String
+  // The provider's checkout session id (cs_...), what webhook events name.
+  checkoutSessionId String        @map("checkout_session_id")
+  // The hosted payment page the customer is sent to.
+  checkoutUrl       String        @map("checkout_url")
+  amountMinor       BigInt        @map("amount_minor")
+  currency          String        @db.Char(3)
+  status            PaymentStatus @default(PENDING)
+  expiresAt         DateTime      @map("expires_at") @db.Timestamptz(3)
+  // Set from the event that reported the money (Stripe's PaymentIntent id and the event's time).
+  paymentIntentId   String?       @map("payment_intent_id")
+  paidAt            DateTime?     @map("paid_at") @db.Timestamptz(3)
+  // Money arrived for an invoice that no longer wanted it (already paid, voided) or for the wrong amount:
+  // someone has to refund it. Only ever set, never cleared, by the application.
+  refundDue         Boolean       @default(false) @map("refund_due")
+  createdAt         DateTime      @default(dbgenerated("clock_timestamp()")) @map("created_at") @db.Timestamptz(3)
+  organization      Organization  @relation(fields: [organizationId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  // NoAction like invoices -> customers: only drafts can be deleted and drafts never have payments, while an
+  // organization's deletion removes both in one statement.
+  invoice           Invoice       @relation(fields: [organizationId, invoiceId], references: [organizationId, id], onDelete: NoAction, onUpdate: NoAction)
+  events            StripeEvent[]
+
+  @@unique([organizationId, id])
+  @@unique([organizationId, checkoutSessionId])
+  @@index([organizationId, invoiceId])
+  @@map("payments")
+}
+
+// The webhook inbox: one row per provider event that changed (or was checked against) a payment, keyed by the
+// provider's event id. Inserting it is the first statement of the event's transaction, so a second delivery of
+// the same event waits for the first and then finds it: each event takes effect exactly once.
+model StripeEvent {
+  // Stripe's event id (evt_...), unique across Stripe; only signed events reach the insert.
+  id              String       @id
+  organizationId  String       @map("organization_id") @db.Uuid
+  type            String
+  paymentId       String?      @map("payment_id") @db.Uuid
+  // What processing did ("invoice-paid", "stale", ...); null only inside the processing transaction.
+  outcome         String?
+  // The event's own creation time (Stripe's `created`), and when it arrived here.
+  stripeCreatedAt DateTime     @map("stripe_created_at") @db.Timestamptz(3)
+  receivedAt      DateTime     @default(dbgenerated("clock_timestamp()")) @map("received_at") @db.Timestamptz(3)
+  organization    Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  payment         Payment?     @relation(fields: [organizationId, paymentId], references: [organizationId, id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@index([organizationId, paymentId])
+  @@map("stripe_events")
 }
