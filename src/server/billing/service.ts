@@ -200,16 +200,25 @@ export async function expirePendingCheckouts(
   provider: BillingProvider,
 ): Promise<{ expired: number; retryable: string[] }> {
   if (!UUID.test(invoiceId)) return { expired: 0, retryable: [] };
-  const pending = await run((tx) => tx.payment.findMany({ where: { invoiceId, status: "PENDING", provider: provider.name }, select: { checkoutSessionId: true } }));
+  const pending = await run((tx) => pendingSessions(tx, invoiceId, provider));
+  return expireSessions(provider, pending);
+}
+
+const pendingSessions = async (tx: TenantTx, invoiceId: string, provider: BillingProvider): Promise<string[]> =>
+  (await tx.payment.findMany({ where: { invoiceId, status: "PENDING", provider: provider.name }, select: { checkoutSessionId: true } })).map(
+    (p) => p.checkoutSessionId,
+  );
+
+async function expireSessions(provider: BillingProvider, sessionIds: string[]): Promise<{ expired: number; retryable: string[] }> {
   let expired = 0;
   const retryable: string[] = [];
-  for (const { checkoutSessionId } of pending) {
+  for (const id of sessionIds) {
     try {
-      await provider.expireCheckoutSession(checkoutSessionId);
+      await provider.expireCheckoutSession(id);
       expired += 1;
     } catch (error) {
-      console.error(`billing: expiring ${checkoutSessionId} failed: ${(error as Error).message}`);
-      if (!(error instanceof ProviderError && SESSION_ALREADY_CLOSED.has(error.code))) retryable.push(checkoutSessionId);
+      console.error(`billing: expiring ${id} failed: ${(error as Error).message}`);
+      if (!(error instanceof ProviderError && SESSION_ALREADY_CLOSED.has(error.code))) retryable.push(id);
     }
   }
   return { expired, retryable };
@@ -225,10 +234,14 @@ export async function expirePendingCheckouts(
  */
 export function expireOthersWhenPaid<E extends CheckoutEvent>(provider: BillingProvider, runFor: (event: E) => TenantRun) {
   return async (event: E): Promise<void> => {
-    const run = runFor(event);
-    const invoice = await run((tx) => tx.invoice.findUnique({ where: { id: event.invoiceId }, select: { status: true } }));
-    if (!invoice || invoice.status === "OPEN" || invoice.status === "DRAFT") return;
-    const { retryable } = await expirePendingCheckouts(run, event.invoiceId, provider);
+    // One transaction for both reads: this runs after every event.
+    const pending = await runFor(event)(async (tx) => {
+      const invoice = await tx.invoice.findUnique({ where: { id: event.invoiceId }, select: { status: true } });
+      if (!invoice || invoice.status === "OPEN" || invoice.status === "DRAFT") return [];
+      return pendingSessions(tx, event.invoiceId, provider);
+    });
+    if (pending.length === 0) return;
+    const { retryable } = await expireSessions(provider, pending);
     if (retryable.length > 0) throw new Error(`couldn't expire ${retryable.join(", ")} yet`);
   };
 }

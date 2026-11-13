@@ -4,8 +4,8 @@
 //
 // For each concurrency C: N fresh checkout.session.completed events (each paying a different open invoice of one
 // of 16 organizations) go through handleStripeWebhook on C workers sharing a pool of C connections: signature
-// check, parsing, and the event's transaction as tally_app (inbox insert, invoice and payment locks, both updates,
-// the outcome). Then the same N events again, as Stripe's retries would send them: each must answer "duplicate"
+// check, parsing, the event's transaction as tally_app (inbox insert, invoice and payment locks, both updates, the
+// outcome) and the app's after-effects hook (a read of the invoice's pending links). Then the same N events again, as Stripe's retries would send them: each must answer "duplicate"
 // and change nothing. Then it checks every invoice is PAID exactly once, and times signature verification alone.
 //
 // Synthetic data; events are built and signed here the way Stripe would. Environment: BENCH_ADMIN_URL /
@@ -15,6 +15,8 @@ import { execFileSync } from "node:child_process";
 import { writeFileSync } from "node:fs";
 import { cpus, loadavg } from "node:os";
 import pg from "pg";
+import { MockProvider } from "../src/server/billing/mock-provider";
+import { expireOthersWhenPaid } from "../src/server/billing/service";
 import { computeSignature, signatureHeader, verifySignature } from "../src/server/billing/signature";
 import { handleStripeWebhook, type WebhookDeps } from "../src/server/billing/webhook";
 import { createDb } from "../src/server/db/client";
@@ -175,6 +177,9 @@ async function main(): Promise<void> {
         secret: SECRET,
         run: (e, fn) => withTenant(e.organizationId, fn, app),
         organizationExists: async (id) => (await app.organization.count({ where: { id } })) === 1,
+        // The app's after-effects hook (runtime.ts), so this is the path a delivery takes: after every event, a read of
+        // the invoice and its pending links (none here) in one more transaction.
+        afterApplied: expireOthersWhenPaid(new MockProvider({ webhookSecret: SECRET }), (e) => (fn) => withTenant(e.organizationId, fn, app)),
       };
       try {
         results.push(await deliverAll("fresh", c, bodies, "invoice-paid", deps));
