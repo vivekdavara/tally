@@ -468,10 +468,13 @@ invoice's locks and a pooled connection):
    anyone and is expired at the provider.
 
 Paying by hand or voiding expires the invoice's pending links afterwards (best effort: a link paid anyway is
-recorded with `refund_due`). So does a webhook that pays the invoice, through the handler's `afterApplied` hook, run
-after the event's transaction commits, and that one is not best effort (review round 2): it runs again on every
-redelivery of the event, with the outcome the first application stored, and a failure a retry could fix answers 500,
-so Stripe redelivers until the newer link is gone. A crash between the commit and the hook is covered the same way.
+recorded with `refund_due`). After every webhook event, the handler's `afterApplied` hook does the same whenever the
+invoice is no longer open (no legitimate pending link can exist on a closed invoice, since `payments_guard` only
+creates them for open ones), and that one is not best effort (review rounds 2 and 3): it runs again on every
+redelivery of the event, and any expiry failure except "the session is already closed" answers 500, so Stripe
+redelivers until the stale link is gone. A crash between the commit and the hook is covered the same way. The event's
+own transaction reads the closed invoice's pending links and hands them to the hook (a separate transaction cost
+about 0.35 ms per event and a fifth of the peak throughput; README, "Results (day 3)").
 
 ### Webhooks: authentic, then exactly once
 
