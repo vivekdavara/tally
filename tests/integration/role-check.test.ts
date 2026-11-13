@@ -184,10 +184,44 @@ describe("the role check against Postgres", () => {
     expect(facts.policyProblems).toEqual(["unexpected policy wide_open on invoice_counters"]);
   });
 
+  // Billing (day 3): what a payment is for, and its records, are written once and kept.
+  it.each([
+    ["UPDATE", "invoice_id", "payments"],
+    ["UPDATE", "provider", "payments"],
+    ["UPDATE", "checkout_session_id", "payments"],
+    ["UPDATE", "checkout_url", "payments"],
+    ["UPDATE", "amount_minor", "payments"],
+    ["UPDATE", "currency", "payments"],
+    ["UPDATE", "expires_at", "payments"],
+    ["UPDATE", "organization_id", "payments"],
+    ["INSERT", "id", "payments"],
+    ["UPDATE", "type", "stripe_events"],
+    ["UPDATE", "payment_id", "stripe_events"],
+    ["UPDATE", "stripe_created_at", "stripe_events"],
+    ["UPDATE", "id", "stripe_events"],
+    ["UPDATE", "organization_id", "stripe_events"],
+  ])("sees %s (%s) on %s, one grant at a time", async (privilege, column, table) => {
+    const facts = await factsAfter([`GRANT ${privilege} (${column}) ON ${table} TO tally_app`], "tally_app");
+    expect(facts.forbiddenPrivileges).toEqual([`${privilege} (${column}) on ${table}`]);
+  });
+
+  it("sees DELETE or TRUNCATE on payments and stripe_events", async () => {
+    const facts = await factsAfter(["GRANT DELETE, TRUNCATE ON payments, stripe_events TO tally_app"], "tally_app");
+    expect(facts.forbiddenPrivileges).toEqual(["DELETE on payments", "DELETE on stripe_events", "TRUNCATE on payments", "TRUNCATE on stripe_events"]);
+  });
+
+  it("sees row-level security switched off on payments, or a policy added to stripe_events", async () => {
+    expect((await factsAfter(["ALTER TABLE payments NO FORCE ROW LEVEL SECURITY"], "tally_app")).unprotectedTables).toEqual(["payments"]);
+    const facts = await factsAfter(["CREATE POLICY wide_open ON stripe_events USING (true)"], "tally_app");
+    expect(facts.policyProblems).toEqual(["unexpected policy wide_open on stripe_events"]);
+  });
+
   it.each([
     ["invoices", "invoices_guard"],
     ["invoice_lines", "invoice_lines_guard"],
     ["invoice_counters", "invoice_counters_guard"],
+    ["payments", "payments_guard"],
+    ["stripe_events", "stripe_events_guard"],
   ])("sees the %s trigger %s disabled or dropped", async (table, trigger) => {
     expect((await factsAfter([`ALTER TABLE ${table} DISABLE TRIGGER ${trigger}`], "tally_app")).missingTriggers).toEqual([`${table}.${trigger}`]);
     expect((await factsAfter([`DROP TRIGGER ${trigger} ON ${table}`], "tally_app")).missingTriggers).toEqual([`${table}.${trigger}`]);
