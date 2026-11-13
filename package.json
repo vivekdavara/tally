@@ -21,6 +21,7 @@
     "bench:signin": "tsx scripts/bench-signin.ts",
     "bench:finalize": "tsx scripts/bench-finalize.ts",
     "bench:webhook": "tsx scripts/bench-webhook.ts",
+    "reconcile": "tsx scripts/reconcile.ts",
     "db:setup": "scripts/db-setup.sh",
     "db:migrate": "prisma migrate deploy",
     "check": "npm run typecheck && npm run lint && npm test"
