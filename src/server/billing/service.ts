@@ -183,35 +183,46 @@ export async function startCheckout(run: TenantRun, givenId: string, deps: Check
 }
 
 /**
- * After an invoice is paid by hand or voided: ends its pending sessions at the provider, so the customer can't pay
- * them. The provider then sends checkout.session.expired, which marks each payment EXPIRED. Best effort: a session
- * that is paid anyway is still recorded, with refund_due set (processCheckoutEvent). PROCESSING payments can't be
- * expired (the customer already submitted a bank debit).
+ * Ends an invoice's pending sessions at the provider, so the customer can't pay them (after it was paid by hand,
+ * voided, or paid by another attempt). The provider then sends checkout.session.expired, which marks each payment
+ * EXPIRED. PROCESSING payments can't be expired (the customer already submitted a bank debit). Returns how many were
+ * expired and the failures worth retrying (network, 429, 5xx); a refusal that won't change on retry (the session is
+ * already expired or paid) is only logged. A session that is paid anyway is still recorded, with refund_due set.
  */
-export async function expirePendingCheckouts(run: TenantRun, invoiceId: string, provider: BillingProvider): Promise<number> {
-  if (!UUID.test(invoiceId)) return 0;
+export async function expirePendingCheckouts(
+  run: TenantRun,
+  invoiceId: string,
+  provider: BillingProvider,
+): Promise<{ expired: number; retryable: string[] }> {
+  if (!UUID.test(invoiceId)) return { expired: 0, retryable: [] };
   const pending = await run((tx) => tx.payment.findMany({ where: { invoiceId, status: "PENDING", provider: provider.name }, select: { checkoutSessionId: true } }));
   let expired = 0;
+  const retryable: string[] = [];
   for (const { checkoutSessionId } of pending) {
     try {
       await provider.expireCheckoutSession(checkoutSessionId);
       expired += 1;
     } catch (error) {
       console.error(`billing: expiring ${checkoutSessionId} failed: ${(error as Error).message}`);
+      if (error instanceof ProviderError && error.retryable) retryable.push(checkoutSessionId);
     }
   }
-  return expired;
+  return { expired, retryable };
 }
 
 /**
  * WebhookDeps.afterApplied for the app: once an event has paid an invoice, end its other pending payment links. A
  * late success on an attempt given up on (FAILED, EXPIRED) can pay the invoice while a newer link is still live, and
- * the customer could pay that one too (review suspicion; it would be recorded with refund_due, but a refund costs
- * fees and a support conversation).
+ * the customer could pay that one too (review round 1's suspicion). It must not be best effort (review round 2): it
+ * throws when an expiry failed in a way a retry could fix, so the webhook answers 500 and Stripe redelivers; the
+ * redelivery is a duplicate, which runs this again with the stored outcome. The same happens if the process died
+ * after the event's commit and before this finished.
  */
 export function expireOthersWhenPaid<E extends CheckoutEvent>(provider: BillingProvider, runFor: (event: E) => TenantRun) {
   return async (event: E, outcome: string): Promise<void> => {
-    if (outcome === "invoice-paid") await expirePendingCheckouts(runFor(event), event.invoiceId, provider);
+    if (outcome !== "invoice-paid") return;
+    const { retryable } = await expirePendingCheckouts(runFor(event), event.invoiceId, provider);
+    if (retryable.length > 0) throw new Error(`couldn't expire ${retryable.join(", ")} yet`);
   };
 }
 
@@ -219,7 +230,8 @@ export function expireOthersWhenPaid<E extends CheckoutEvent>(provider: BillingP
 
 export type EventResult =
   | { kind: "processed"; outcome: string }
-  | { kind: "duplicate" }
+  /** Applied before; `outcome` is what that application recorded, so its after-effects can run again. */
+  | { kind: "duplicate"; outcome: string | null }
   /** No payment has this session in the event's organization: nothing was stored, so a retry can still apply it. */
   | { kind: "unknown-session" };
 
@@ -244,7 +256,10 @@ export async function processCheckoutEvent(tx: TenantTx, event: CheckoutEvent): 
             ${event.created.toISOString()}::timestamptz)
     ON CONFLICT (id) DO NOTHING
     RETURNING id`;
-  if (inserted.length === 0) return { kind: "duplicate" };
+  if (inserted.length === 0) {
+    const stored = await tx.stripeEvent.findUnique({ where: { id: event.id }, select: { outcome: true } });
+    return { kind: "duplicate", outcome: stored?.outcome ?? null };
+  }
 
   const outcome = await apply(tx, event, found);
   await tx.stripeEvent.update({ where: { id: event.id }, data: { outcome } });

@@ -352,7 +352,7 @@ describe("webhook events", () => {
     const { provider, delivered } = mock();
     ok(await startCheckout(org.run, invoiceId, checkoutDeps(provider)));
     await org.run((tx) => voidInvoice(tx, invoiceId));
-    expect(await expirePendingCheckouts(org.run, invoiceId, provider)).toBe(1);
+    expect(await expirePendingCheckouts(org.run, invoiceId, provider)).toEqual({ expired: 1, retryable: [] });
     expect((await deliver(delivered.at(-1)!)).body.outcome).toBe("payment-expired");
     expect((await state(org, invoiceId)).payments).toEqual([{ status: "EXPIRED", refundDue: false }]);
   });

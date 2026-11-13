@@ -154,6 +154,8 @@ async function closeInvoice(slug: string, id: string, fn: (tx: TenantTx) => Prom
   const { run } = await requireTenant(slug);
   const result = await refusals(() => run(fn));
   if (!result.ok) return message(result);
+  // Best effort here (the invoice is already closed); failures are logged, and a link paid anyway is recorded with
+  // refund_due set.
   await expirePendingCheckouts(run, id, billing().provider);
   revalidatePath(invoicePath(slug, id));
   return {};

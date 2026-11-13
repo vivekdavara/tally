@@ -13,8 +13,10 @@ export interface WebhookDeps {
   /** Unix seconds, for tests. */
   now?: number;
   /**
-   * Runs after an event's transaction committed (the app: expire the invoice's other pending links once it is paid).
-   * Its failure is logged; the answer stays 200, since the event itself was applied.
+   * After-effects of an applied event, run after its transaction committed (the app: expire the invoice's other
+   * pending links once it is paid). Run again on every redelivery of that event, with the stored outcome, so they
+   * must be idempotent; if they throw, the answer is 500 and Stripe redelivers (review round 2: run only on the first
+   * delivery and with failures swallowed, a crash or a transient provider error left a second link payable).
    */
   afterApplied?: (event: VerifiedCheckoutEvent, outcome: string) => Promise<void>;
 }
@@ -37,14 +39,20 @@ export async function handleStripeWebhook(body: Uint8Array, header: string | nul
     console.error(`billing: processing ${event.id} (${event.type}) failed: ${(error as Error).message}`);
     return { status: 500, body: { result: "error" } };
   }
-  if (result.kind === "duplicate") return { status: 200, body: { result: "duplicate" } };
-  if (result.kind === "processed") {
-    try {
-      await deps.afterApplied?.(event, result.outcome);
-    } catch (error) {
-      console.error(`billing: after ${event.id} (${result.outcome}): ${(error as Error).message}`);
+  if (result.kind === "processed" || result.kind === "duplicate") {
+    const outcome = result.outcome;
+    if (outcome !== null && deps.afterApplied) {
+      try {
+        await deps.afterApplied(event, outcome);
+      } catch (error) {
+        // The event stays applied; Stripe's retry will be a duplicate that runs the after-effects again.
+        console.error(`billing: after-effects of ${event.id} (${outcome}) failed: ${(error as Error).message}`);
+        return { status: 500, body: { result: "error", reason: "after-effects failed" } };
+      }
     }
-    return { status: 200, body: { result: "processed", outcome: result.outcome } };
+    return result.kind === "duplicate"
+      ? { status: 200, body: { result: "duplicate" } }
+      : { status: 200, body: { result: "processed", outcome: result.outcome } };
   }
   // No such session in that organization. A deleted organization's events will never apply: acknowledge them.
   // Otherwise the session's row may not be committed yet (the window between creating a session and storing it),
