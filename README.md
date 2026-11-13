@@ -1,17 +1,18 @@
 # Tally
 
 A multi-tenant invoicing service. Businesses sign up as **organizations**, keep their **customers**, and send them
-**invoices** with exact totals, gapless numbers and PDFs. Every organization's data lives in one shared Postgres database, so the property the
+**invoices** with exact totals, gapless numbers and PDFs, which customers pay by card through a hosted checkout page. Every organization's data lives in one shared Postgres database, so the property the
 whole design is built around is **tenant isolation**: a request made for one organization can't read or change
 another's data, even when the application code has a bug.
 
 Next.js 16 (App Router, Server Components, Server Actions), Prisma 7 with the `pg` driver adapter, PostgreSQL 14
 row-level security, Auth.js v5, Zod, Vitest, Playwright, TypeScript.
 
-**Status: day 2 of 5.** Day 1: design, scaffold, schema and migrations with row-level security, database roles,
+**Status: day 3 of 5.** Day 1: design, scaffold, schema and migrations with row-level security, database roles,
 sign-up and sign-in, tests and CI. Day 2: customers; invoices with line items, totals and per-rate taxes in exact
 integer arithmetic; gapless per-organization numbering and the invoice life cycle enforced by the database; invoice
-PDFs. [DESIGN.md](DESIGN.md) is the specification;
+PDFs. Day 3: billing: payment links for open invoices through a provider interface (a Stripe-like mock by default,
+Stripe's test mode opt-in), signed webhooks processed exactly once, the payment life cycle enforced by the database. [DESIGN.md](DESIGN.md) is the specification;
 [WALKTHROUGH.md](WALKTHROUGH.md) answers the questions an interviewer is likely to ask.
 
 ## Why
@@ -47,6 +48,18 @@ Invoices add a second kind of guarantee, about money rather than tenants:
   number, issue time and totals themselves (the application has no privilege on those columns), and refuse any change
   to a final invoice or its lines, including from raw SQL that skips the services.
 
+Billing (day 3) adds a third: **money moves once, and is never lost.**
+
+- **Webhooks are authentic and take effect once.** The signature (HMAC-SHA256 over the raw body, constant-time,
+  five-minute tolerance) is checked first; then the event's id goes into an inbox table as the first statement of its
+  transaction, so a redelivery, even ten at once, finds it and changes nothing.
+- **The tenant comes from Stripe's signature, not a login.** The organization is named in the checkout session's
+  metadata, which Stripe signs; the data access layer only accepts a verified event's type, and row security still
+  limits the event to that organization's payments.
+- **Payments only move forward, and money that arrives is always recorded:** a late success after an expiry still
+  counts; money for an invoice that's already paid or void, or for the wrong amount, is kept with a "refund due" flag
+  instead of paying anything. A trigger enforces the life cycle and freezes what a payment is for.
+
 ## Architecture
 
 ```mermaid
@@ -55,10 +68,13 @@ flowchart LR
     P --> A["Auth.js<br/>JWT cookie: user id only"]
     P --> D["requireMembership(slug)<br/>404 unless a member"]
     D --> T["withTenant(orgId, fn)<br/>one transaction"]
-    T -->|"set_config('app.organization_id', orgId, true)"| PG[("PostgreSQL 14<br/>RLS forced on customers, invoices,<br/>invoice_lines, invoice_counters;<br/>life-cycle triggers")]
+    T -->|"set_config('app.organization_id', orgId, true)"| PG[("PostgreSQL 14<br/>RLS forced on customers, invoices,<br/>invoice_lines, invoice_counters,<br/>payments, stripe_events;<br/>life-cycle triggers")]
     T -->|"as tally_app"| PG
     M["prisma migrate deploy"] -->|"as tally_owner"| PG
     S["startup + /api/health:<br/>assertSafeAppRole"] --> PG
+    P -->|"create checkout session<br/>(between two transactions)"| X["Stripe test mode<br/>or the mock"]
+    X -->|"signed webhook"| W["/api/stripe/webhook<br/>verify, then runForStripeEvent"]
+    W --> T
 ```
 
 ## Layout
@@ -71,7 +87,9 @@ scripts/db-setup.sh              roles (tally_owner, tally_app) and databases, i
 scripts/bench-tenant.ts          what isolation costs per query
 scripts/bench-signin.ts          whether sign-in timing reveals which emails exist
 scripts/bench-finalize.ts        what gapless numbering costs: one organization vs many
+scripts/bench-webhook.ts         what the webhook path costs: fresh events and redeliveries
 scripts/sample-pdf.ts            sample invoice PDFs (synthetic) for looking at the layout
+scripts/stripe-smoke.ts          checks the Stripe client against Stripe's test mode (needs your key)
 src/server/db/tenant.ts          withTenant
 src/server/db/role-check.ts      assertSafeAppRole: is RLS binding this connection?
 src/server/auth/                 passwords (scrypt), Zod schemas, credentials, sign-up
@@ -79,8 +97,11 @@ src/server/dal.ts                requireUser, requireMembership, requireTenant
 src/server/invoices/money.ts     exact arithmetic: parsing, rounding, totals, formatting
 src/server/invoices/service.ts   customers, drafts, lines, finalize, paid, void (inside a tenant transaction)
 src/server/invoices/pdf.ts       the PDF writer
+src/server/billing/              provider interface, mock + Stripe clients, limits, signatures, events,
+                                 payment links and event processing (service.ts), the webhook handler
 src/auth.ts                      Auth.js configuration
-src/app/                         pages, Server Actions, /api/auth, /api/health, /o/[slug]/invoices/[id]/pdf
+src/app/                         pages, Server Actions, /api/auth, /api/health, /o/[slug]/invoices/[id]/pdf,
+                                 /api/stripe/webhook, /mock-checkout/[id], /paid
 tests/unit, tests/integration    Vitest (integration tests against real Postgres)
 e2e/                             Playwright
 ```
@@ -98,6 +119,13 @@ npm run db:migrate                  # as tally_owner
 npm run dev                         # http://localhost:8117
 ```
 
+Billing runs on the mock provider unless configured otherwise: "Create payment link" on an open invoice opens
+`/mock-checkout/<session>`, where you play the customer (pay by card or bank debit, let it expire, resend an event)
+and watch the webhook's answers. To use Stripe's test mode with your own keys, set `BILLING_PROVIDER=stripe`,
+`STRIPE_SECRET_KEY=sk_test_...` and `STRIPE_WEBHOOK_SECRET=whsec_...` (from `stripe listen --forward-to
+localhost:8117/api/stripe/webhook`); `npx tsx scripts/stripe-smoke.ts` checks the client against Stripe first. A live
+key is refused at startup.
+
 For production mode locally, `npm run build && AUTH_TRUST_HOST=true npm start` (Auth.js wants the trusted host stated
 outside development). The server checks at startup that its database role is bound by row-level security and exits
 if it isn't, so a `DATABASE_URL` pointing at `tally_owner` or a superuser won't start.
@@ -107,7 +135,7 @@ Checks:
 ```bash
 npm run check                       # typecheck, lint, unit + integration tests (needs Postgres)
 npm run build && npm run e2e        # Playwright against next start on :8117, database tally_e2e
-scripts/db-setup.sh tally_bench && npm run bench && npm run bench:signin && npm run bench:finalize
+scripts/db-setup.sh tally_bench && npm run bench && npm run bench:signin && npm run bench:finalize && npm run bench:webhook
 npx tsx scripts/sample-pdf.ts .scratch/pdf   # writes sample PDFs (synthetic invoices)
 ```
 
@@ -300,10 +328,27 @@ finding as a failing test (`tests/review/`).
 - **scrypt from Node's standard library**, parameters stored per hash, NFKC-normalized input, a dummy hash for
   unknown emails so sign-in timing doesn't reveal accounts.
 
+## Limitations (day 3)
+
+- **Stripe itself is untested here.** The Stripe client is tested against a local stand-in that checks every request
+  it sends, and the mock answers like Stripe where Tally depends on it, but nothing in this repository has talked to
+  api.stripe.com: there is no key. `scripts/stripe-smoke.ts` is the check to run with a test key.
+- No refunds or partial payments: PAID is final, and money that arrives for an invoice that doesn't want it is only
+  flagged (`refund_due`, a "Refund due" badge); refunding it is done by hand in Stripe's dashboard.
+- No reconciliation job: if the webhook endpoint were down longer than Stripe's three days of retries, events would
+  be lost; listing Stripe's events since the last one seen would recover them.
+- Events are applied inline, in the request (milliseconds; "Results (day 3)" has the numbers), not from a queue.
+- A session whose row was never stored (a crash after creating it, then no retry) gets 404s, and so Stripe retries,
+  for three days; it was never shown to anyone, so nobody can pay it.
+- The mock keeps its sessions in memory: a restart forgets them (their payment rows stay PENDING until they expire
+  by Tally's clock). In mock mode anyone holding a payment link can "pay" it, which is what a mock is for; a
+  deployment sets `BILLING_PROVIDER=stripe`.
+- KWD invoices can't be paid by card (Stripe's three-decimal rules unconfirmed).
+- Roles and the full isolation suite are day 4: today any member can create payment links, mark paid or void.
+
 ## Limitations (day 2)
 
-- Billing (Stripe) is day 3, roles enforced and the full isolation suite day 4: today any member can finalize,
-  void or mark an invoice paid.
+- Billing (Stripe) was day 3; roles enforced and the full isolation suite day 4.
 - No discounts, credit notes or negative lines: every amount is non-negative, which is what lets "half up" and "half
   away from zero" be one rule. Tax is a rate per line; there are no tax-inclusive prices or compound taxes.
 - PDFs use the standard Helvetica (no embedded font), so characters outside Windows-1252 print as "?" (a currency
