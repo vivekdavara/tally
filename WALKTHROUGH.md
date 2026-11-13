@@ -391,8 +391,18 @@ are closed by taking the invoice lock first. Its suspicions led to four more fix
 and 3 each found two bugs in the previous round's fix, all about that last one: it ran only on the first delivery and
 swallowed transient errors (now duplicates re-run it and a retryable failure answers 500), it took a plain-text 429
 for a permanent refusal, and it ignored a "refund-due-paid" event that followed a failed expiry after marking paid by
-hand (now it acts whenever the invoice is closed). The lesson I took: a side effect after a commit needs a retry path,
+hand (now it acts whenever the invoice is closed). Round 4 then caught round 3 overcorrecting: retrying every
+failure meant a permanent refusal kept the endpoint at 500 for days; now only what the provider calls retryable is. The lesson I took: a side effect after a commit needs a retry path,
 and "best effort" is a decision to write down, not a default.
+
+**What if your webhook endpoint is down for four days?**
+Stripe stops retrying after three days (a few hours in test mode), so those deliveries are gone; the events aren't.
+`npm run reconcile -- 96` lists Stripe's checkout-session events from the last 96 hours (`GET /v1/events`, paged,
+oldest first) and applies each through the same function a delivery goes through (`applyParsed`). It's safe to run
+any number of times because of the inbox: anything already applied answers "duplicate". `tests/integration/
+reconcile.test.ts` drops deliveries on purpose and shows a second run changes nothing. A fetched event has no
+signature to check; it's authentic because Tally fetched it with its own key over TLS, which is why
+`parseFetchedEvent` is the one other function allowed to produce a `VerifiedCheckoutEvent`.
 
 **What did you find yourself?**
 That Prisma 7.10's pg adapter drops time zones both ways, so on a non-UTC database every stored time was five hours
@@ -404,8 +414,7 @@ insert's foreign-key check holds `FOR KEY SHARE` on the payment, which my `FOR U
 
 - Rate-limit sign-in (day 4), and email verification to stop sign-up from revealing accounts.
 - Refunds and partial payments: new payment and invoice states (PAID can't change today), a refund action for
-  `refund_due` payments, and a reconciliation job that lists Stripe's events since the last one seen, for anything a
-  webhook outage longer than Stripe's three days of retries would lose.
+  `refund_due` payments; and run reconciliation on a schedule (day 4's background job) instead of by hand.
 - Process webhooks from a queue: answer 200 as soon as the event is stored, apply it in a worker, as Stripe
   recommends at volume. Today the transaction is short enough (measured in the README) to do inline.
 - Credit notes rather than editing a final invoice: a negative document that references the original, numbered in

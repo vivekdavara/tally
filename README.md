@@ -90,6 +90,7 @@ scripts/bench-finalize.ts        what gapless numbering costs: one organization 
 scripts/bench-webhook.ts         what the webhook path costs: fresh events and redeliveries
 scripts/sample-pdf.ts            sample invoice PDFs (synthetic) for looking at the layout
 scripts/stripe-smoke.ts          checks the Stripe client against Stripe's test mode (needs your key)
+scripts/reconcile.ts             replays Stripe's events of the last N hours (lost webhook deliveries)
 src/server/db/tenant.ts          withTenant
 src/server/db/role-check.ts      assertSafeAppRole: is RLS binding this connection?
 src/server/auth/                 passwords (scrypt), Zod schemas, credentials, sign-up
@@ -147,7 +148,7 @@ and everything else runs.
 Apple M3 laptop (macOS 26.6.2, Node 23.11, Postgres 14.20), no review agent running during the benchmarks, load
 average 3.4 to 4.7 (other processes). The no-hook runs were on battery, the later ones on AC. Synthetic data.
 
-- **Tests:** 527 Vitest tests in 62 files (`npm run check`, 32.5 s, files one at a time), 135 of them new today; 22
+- **Tests:** 534 Vitest tests in 64 files (`npm run check`, files one at a time), 142 of them new today; 22
   Playwright tests (`npm run e2e`, 15.1 s), 6 new. Among the new: the signature scheme checked against `openssl dgst
   -hmac`; the Stripe client's every request checked by a local stand-in for api.stripe.com (form encoding, bearer key,
   idempotency key, error mapping, timeout, the 409 wait); the payment guards through raw SQL as the app and as a
@@ -155,8 +156,8 @@ average 3.4 to 4.7 (other processes). The no-hook runs were on battery, the late
   session and one row** (37 runs without a failure after the fix); a crash between the provider call and the insert
   recovers the same session; **one event delivered 10 times at once: one "processed", nine "duplicate"**; events out
   of order, late, for the wrong amount, for a paid or void invoice, and naming another organization; time zones
-  through Prisma on a New York database; the three review rounds' findings (`tests/review-d3/`, `tests/review-d3r2/`,
-  `tests/review-d3r3/`); e2e of a card payment and a bank debit through the mock checkout page (a resent event
+  through Prisma on a New York database; reconciliation after lost deliveries (applied once, in order, a second run
+  all duplicates); the four review rounds' findings (`tests/review-d3/` to `tests/review-d3r4/`); e2e of a card payment and a bank debit through the mock checkout page (a resent event
   answers "duplicate"), voiding expiring the link, and the webhook route over HTTP (unsigned, forged, stale,
   oversized).
 - **What the webhook path costs** (`npm run bench:webhook` on the final code, `524de2c`, run twice on AC; 2,000 events
@@ -274,7 +275,7 @@ All measured on an Apple M3 laptop (macOS 26.6.2, Node 23.11, Postgres 14.20), o
 
 ### Day 3
 
-Three review agents, one after another, each in its own worktree and database, findings as failing tests; every
+Four review agents, one after another, each in its own worktree and database, findings as failing tests; every
 finding reproduced here before fixing.
 
 - **Round 1** (at `b47a6ba`, 11 minutes, `tests/review-d3/`): **an upper-case invoice id lost the payment.** The URL
@@ -301,8 +302,12 @@ finding reproduced here before fixing.
   behind a 200; the Stripe client now marks 409/429/5xx retryable whatever the body, and expiring a link retries
   every failure except "the session is already closed". **A failed expiry after marking paid by hand** was never
   retried, because the next paying event's outcome was "refund-due-paid", not "invoice-paid"; the hook now acts after
-  any event whenever the invoice is no longer open. Both checked as mutations. As on Canary, Orderly and Pathfinder,
-  each round found bugs in the previous round's fixes, so a fourth would likely find more; stopped for time.
+  any event whenever the invoice is no longer open. Both checked as mutations.
+- **Round 4** (at `cd0642e`, 4 minutes, `tests/review-d3r4/`): one finding, in round 3's fix. Retrying every expiry
+  failure except "already closed" meant **a permanent refusal kept every event for the invoice at 500** until Stripe
+  gave up (and might disable the endpoint). Now only what the provider marks retryable is retried; refusals are logged.
+  Checked by mutation (undoing the client's plain-text 429 fix fails round 3's test again). As on Canary, Orderly and
+  Pathfinder, every round found bugs in the previous round's fix (2, 2, 2, 1 here); stopped after four for time.
 
 ### Day 2
 
@@ -428,9 +433,12 @@ finding as a failing test (`tests/review/`).
   api.stripe.com: there is no key. `scripts/stripe-smoke.ts` is the check to run with a test key.
 - No refunds or partial payments: PAID is final, and money that arrives for an invoice that doesn't want it is only
   flagged (`refund_due`, a "Refund due" badge); refunding it is done by hand in Stripe's dashboard.
-- No reconciliation job: if the webhook endpoint were down longer than Stripe's three days of retries (fewer, over a few
-  hours, in test mode), events would be lost; listing Stripe's events since the last one seen would recover them. The
-  same job would be the backstop for after-effects that keep failing: today their only retry is Stripe's redelivery.
+- Reconciliation (`npm run reconcile -- <hours>`) is a script to run by hand or from cron; nothing schedules it yet
+  (day 4 adds a background job). It recovers events lost to an outage longer than Stripe's retries (three days live,
+  a few hours in test mode), within Stripe's 30 days of event retention, and it is also the backstop for after-effects
+  that keep failing. Its Stripe side is tested only against the local stand-in.
+- An expiry the provider refuses outright (a 4xx, e.g. a rotated key) is logged, not retried; a link it leaves payable
+  is recorded with `refund_due` if paid.
 - Expiring a closed invoice's links right after marking it paid or voiding it is best effort; a failure there is
   retried only when the next event for that invoice arrives (round 3), and a link paid in between is recorded with
   `refund_due`.

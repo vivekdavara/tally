@@ -471,8 +471,9 @@ Paying by hand or voiding expires the invoice's pending links afterwards (best e
 recorded with `refund_due`). After every webhook event, the handler's `afterApplied` hook does the same whenever the
 invoice is no longer open (no legitimate pending link can exist on a closed invoice, since `payments_guard` only
 creates them for open ones), and that one is not best effort (review rounds 2 and 3): it runs again on every
-redelivery of the event, and any expiry failure except "the session is already closed" answers 500, so Stripe
-redelivers until the stale link is gone. A crash between the commit and the hook is covered the same way. The event's
+redelivery of the event, and an expiry failure the provider marks retryable (network, 409, 429, 5xx, whatever the
+body) answers 500, so Stripe redelivers until the stale link is gone. A refusal (a 4xx with an error code) is logged
+and not retried: retrying it would keep every event for the invoice at 500 until Stripe gave up (round 4). A crash between the commit and the hook is covered the same way. The event's
 own transaction reads the closed invoice's pending links and hands them to the hook (a separate transaction cost
 about 0.35 ms per event and a fifth of the peak throughput; README, "Results (day 3)").
 
@@ -515,6 +516,19 @@ kilobytes), then:
 | 404 unknown-session | the session isn't stored (yet): the window between creating a session and storing it | retries |
 | 413 | body over 256 KiB | retries |
 | 500 | processing failed (rolled back, nothing stored), or the after-effects of an applied event failed | retries |
+
+### Reconciliation
+
+Webhooks are the fast path; the provider's event log is the record. An endpoint down longer than Stripe's retries
+(three days in live mode, a few hours in test mode) loses deliveries, so `reconcileEvents` (`reconcile.ts`) lists the
+checkout-session events created since a point in time (`EventSource.listEvents`: Stripe's `GET /v1/events`, 100 a
+page following `starting_after`, returned oldest first; the mock's log of the events it sent) and feeds each through
+the same apply step a delivery takes (`applyParsed`, shared with the webhook handler). An event fetched with Tally's
+own key over TLS is authentic by the channel, so `parseFetchedEvent` skips the signature; it and `parseWebhook` are
+the only makers of a `VerifiedCheckoutEvent`. The inbox makes any number of runs safe: what was applied answers
+"duplicate" (and re-runs its after-effects); what couldn't be applied (an unknown session) is reported and tried on the
+next run. `npm run reconcile -- <hours>` runs it against Stripe; in mock mode the log lives in the server process, so
+the tests run it in-process.
 
 ### Time zones
 
@@ -630,8 +644,9 @@ the same reason. The app listens on port 8117. Tests use a separate database, `t
   client's requests checked by a local stand-in for api.stripe.com); the payment guards through raw SQL; checkout
   links under 8 concurrent clicks, a crash between the provider call and the insert, an invoice voided mid-creation
   and expiry; webhook events delivered once, 10 times at once, out of order, late, for the wrong amount, for a paid or
-  void invoice, for another organization's session; time zones through Prisma; e2e of a payment through the mock
-  checkout page and of the webhook route over HTTP; a benchmark that checks every invoice was paid exactly once.
+  void invoice, for another organization's session; reconciliation after lost deliveries (applied once, in order,
+  repeatable); time zones through Prisma; e2e of payments through the mock checkout page and of the webhook route over
+  HTTP; a benchmark that checks every invoice was paid exactly once.
 - Test files run one at a time: the role-check tests run DDL in transactions that roll back, which takes exclusive
   locks other files' writes would wait on (a deadlock once, when they ran in parallel). And one run at a time per
   database: the global setup empties the tables, so it holds an advisory lock for the whole run, and a second run
