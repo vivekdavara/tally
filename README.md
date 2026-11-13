@@ -142,6 +142,46 @@ npx tsx scripts/sample-pdf.ts .scratch/pdf   # writes sample PDFs (synthetic inv
 On Node 23 (this Mac's), Prisma's preinstall refuses to run; `npm ci --ignore-scripts && npx prisma generate` works,
 and everything else runs.
 
+## Results (day 3)
+
+Apple M3 laptop (macOS 26.6.2, Node 23.11, Postgres 14.20), on battery, load average 3.4 to 4.1 with no review agent
+running during the benchmark. Synthetic data.
+
+- **Tests:** 507 Vitest tests in 60 files (`npm run check`, 31.4 s, files one at a time), 115 of them new today; 21
+  Playwright tests (`npm run e2e`, 13.9 s), 5 new. Among the new: the signature scheme checked against `openssl dgst
+  -hmac`; the Stripe client's every request checked by a local stand-in for api.stripe.com (form encoding, bearer key,
+  idempotency key, error mapping, timeout, the 409 wait); the payment guards through raw SQL as the app and as a
+  superuser; **8 concurrent clicks give one session and one row** (37 runs without a failure after the fix); a crash
+  between the provider call and the insert recovers the same session; **one event delivered 10 times at once: one
+  "processed", nine "duplicate"**; events out of order, late, for the wrong amount, for a paid or void invoice, and
+  naming another organization; time zones through Prisma on a New York database; the review rounds' findings
+  (`tests/review-d3/`, `tests/review-d3r2/`); e2e of a payment through the mock checkout page (a resent event answers
+  "duplicate"), voiding expiring the link, and the webhook route over HTTP (unsigned, forged, stale, oversized).
+- **What the webhook path costs** (`npm run bench:webhook`, the final code, run twice; 2,000 events per case after 200
+  warm-up, 16 organizations, workers sharing a pool of as many connections; each event is a signed
+  `checkout.session.completed` paying a different open invoice; the script checks every answer and that every invoice
+  ended paid once with one event row):
+
+  | Case | Workers | Events/s (run 1 / run 2) | p50 ms | p95 ms | p99 ms |
+  |---|---|---|---|---|---|
+  | fresh event | 1 | 678 / 663 | 1.42 / 1.45 | 1.80 / 1.84 | 2.18 / 2.19 |
+  | redelivered | 1 | 1,659 / 1,635 | 0.59 / 0.60 | 0.64 / 0.66 | 1.11 / 1.11 |
+  | fresh event | 8 | 1,684 / 1,701 | 4.62 / 4.67 | 6.08 / 5.88 | 7.59 / 6.41 |
+  | redelivered | 8 | 3,401 / 3,232 | 2.35 / 2.46 | 3.39 / 3.63 | 3.84 / 4.10 |
+  | fresh event | 32 | 1,681 / 1,634 | 17.42 / 17.88 | 28.38 / 28.96 | 31.24 / 32.07 |
+  | redelivered | 32 | 3,254 / 3,176 | 9.41 / 9.69 | 14.64 / 15.26 | 17.26 / 17.22 |
+
+  A fresh event is one transaction of about eight statements (tenant setting, payment lookup, inbox insert, two
+  locks, two updates, the outcome) at about 1.4 ms alone; throughput stops growing between 8 and 32 workers (about
+  1,700/s), so past 8 the extra workers only queue (p50 4.6 to 17.4 ms). A redelivery stops after the inbox insert
+  and an outcome read, so it costs about 40% of a fresh event. Stripe delivers far below these rates; the numbers say
+  inline processing is affordable, not that it's the design for bursts (a queue would be).
+- **The signature check alone:** a median of 2.0 to 2.1 µs for a 484-byte event (21,000 checks, the first 1,000
+  dropped; printed by the same script).
+- **Startup refuses a misconfigured billing setup:** `BILLING_PROVIDER=stripe` with a live-mode key and no signing
+  secret: `next start` exits 1 with "STRIPE_SECRET_KEY must be a test-mode key ...; STRIPE_WEBHOOK_SECRET must be the
+  endpoint's signing secret" (run by hand with a fake key assembled at the shell).
+
 ## Results (day 2)
 
 Apple M3 laptop (macOS 26.6.2, Node 23.11, Postgres 14.20). The first benchmark run was on battery; the final ones on
@@ -223,6 +263,31 @@ All measured on an Apple M3 laptop (macOS 26.6.2, Node 23.11, Postgres 14.20), o
   49.7 ms for a wrong password: a timing oracle for which emails are registered.
 
 ## Review
+
+### Day 3
+
+Three review agents, one after another, each in its own worktree and database, findings as failing tests; every
+finding reproduced here before fixing.
+
+- **Round 1** (at `b47a6ba`, 11 minutes, `tests/review-d3/`): **an upper-case invoice id lost the payment.** The URL
+  accepts either case and Postgres reads both, but the id went into the checkout session's metadata as typed and the
+  webhook parser only accepted lower case: every event for that session was acknowledged as "not a Tally session",
+  so a paid checkout was never recorded. Fixed at both ends (`startCheckout` lower-cases; the parser accepts either
+  and lower-cases). And **"checkout-busy" was dead code**: a unique violation from a raw query arrives as Prisma's
+  P2010, not P2002, so the helper never recognised it and the answer was a 500. Making that error visible exposed two
+  races my own 8-click test then hit about one run in eight: an identical session tripping the partial unique index
+  (not the `ON CONFLICT` target) instead of doing nothing, which the first version of the fix answered by expiring
+  the *winner's* session; and the live-link check and the attempt count, two statements under READ COMMITTED,
+  disagreeing so a click asked for a second session. Both transactions now lock the invoice first. Its suspicions
+  became four more fixes, each with a test: descriptions cut by code points (an emoji split by `slice` made
+  `encodeURIComponent` throw); Stripe's 409 for an in-flight idempotency key waited out instead of shown as an error;
+  a digest of the request in the idempotency key (a retry after a rename was otherwise refused by Stripe for 24
+  hours); and a late success that pays the invoice now expires its newer pending link.
+- **Round 2** (at `868b60c`, 5 minutes, `tests/review-d3r2/`): both findings in round 1's last fix. **Expiring the
+  newer link was best effort:** it ran only on the delivery that applied the event (a crash after the commit, and
+  Stripe's redelivery answered "duplicate" without it) and swallowed transient provider errors behind a 200. Now a
+  duplicate carries the stored outcome and re-runs the after-effects, and a retryable failure answers 500 so Stripe
+  redelivers. Both halves checked as mutations (each fails a reviewer test).
 
 ### Day 2
 
@@ -327,6 +392,19 @@ finding as a failing test (`tests/review/`).
   every request, so removing someone takes effect immediately even though JWTs can't be revoked.
 - **scrypt from Node's standard library**, parameters stored per hash, NFKC-normalized input, a dummy hash for
   unknown emails so sign-in timing doesn't reveal accounts.
+- **Hosted checkout, not a card form.** The customer types card details on the provider's page; Tally stores a
+  session id and a URL, never a card number, which keeps it out of most PCI scope.
+- **A mock provider by default, a fetch client for Stripe.** Tests, CI and development need no key; the mock answers
+  like Stripe where Tally depends on it and sends real signed events through the real webhook handler. Two Stripe
+  endpoints didn't justify the SDK, and a plain client is testable against a local stand-in.
+- **The provider call between two transactions,** made safe by an idempotency key, rather than inside one (which
+  would hold the invoice's lock across an HTTP call).
+- **An inbox table for exactly-once,** inserted first in the event's own transaction: the event's effect and its
+  "seen" mark commit or roll back together, with no separate dedupe store to keep consistent.
+- **The tenant from a signature, enforced by a type.** `runForStripeEvent` accepts only the branded type the parser
+  returns after verification; row security still checks the session belongs to that organization.
+- **Money is never thrown away:** statuses only move forward, late successes count, and money nobody wants is flagged
+  for a refund rather than paying the wrong thing.
 
 ## Limitations (day 3)
 
