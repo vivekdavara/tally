@@ -307,7 +307,8 @@ describe("webhook events", () => {
     expect((await handleStripeWebhook(lateA.body, lateA.header, withHook)).body.outcome).toBe("invoice-paid");
     // B was expired at the provider, and its expiry event marks it.
     expect(provider.session(b)!.status).toBe("expired");
-    const expiredB = delivered.find((d) => d.type === "checkout.session.expired")!;
+    // B's expiry (the mock also sends A's own, dated at A's expires_at, when it sweeps).
+    const expiredB = delivered.find((d) => d.type === "checkout.session.expired" && JSON.parse(d.body.toString()).data.object.id === b)!;
     expect((await deliver(expiredB)).body.outcome).toBe("payment-expired");
     expect((await state(org, invoiceId)).payments.map((p) => p.status).sort()).toEqual(["EXPIRED", "SUCCEEDED"]);
   });

@@ -13,11 +13,13 @@ async function act(id: string, fn: (mock: NonNullable<ReturnType<typeof mockProv
   if (!mock || !mock.session(id)) notFound();
   try {
     await fn(mock);
+    return {};
   } catch (error) {
     return { error: (error as Error).message };
+  } finally {
+    // Also after a refusal: paying a session that ran out sends its expiry, which the page should show.
+    revalidatePath(`/mock-checkout/${id}`);
   }
-  revalidatePath(`/mock-checkout/${id}`);
-  return {};
 }
 
 export async function payByCardAction(id: string): Promise<FormState> {

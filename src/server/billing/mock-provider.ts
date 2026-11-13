@@ -57,6 +57,7 @@ export class MockProvider implements BillingProvider, EventSource {
   }
 
   async createCheckoutSession(request: CheckoutRequest): Promise<CheckoutSession> {
+    await this.sweep();
     const allowed = chargeability(request.amountMinor, request.currency);
     if (!allowed.ok) throw new ProviderError(`Stripe would refuse this amount: ${allowed.reason}`, allowed.reason, false);
     const fingerprint = JSON.stringify({ ...request, amountMinor: request.amountMinor.toString(), idempotencyKey: undefined });
@@ -174,25 +175,43 @@ export class MockProvider implements BillingProvider, EventSource {
   }
 
   private async open(id: string): Promise<MockSession> {
+    // A session past its expiry is expired (and its event sent) by the sweep, so it fails the status check below.
+    await this.sweep();
     const session = this.sessions.get(id);
     if (!session) throw new ProviderError("No such checkout session", "resource_missing", false);
     if (session.status !== "open") throw new ProviderError(`the session is ${session.status}, not open`, "session_not_open", false);
-    if (this.now() >= session.expiresAt) {
-      // It ran out: Stripe sends checkout.session.expired for that too (review round 5: the mock sent nothing).
-      session.status = "expired";
-      await this.emit("checkout.session.expired", session);
-      throw new ProviderError("the session has expired", "session_not_open", false);
-    }
     return session;
   }
 
   async listEvents(since: Date): Promise<unknown[]> {
+    await this.sweep();
     const from = Math.floor(since.getTime() / 1000);
-    return this.sent.filter((e) => e.created >= from).map((e) => JSON.parse(e.body.toString("utf8")) as unknown);
+    // In creation order, as Stripe lists them (a swept expiry is dated at its expires_at, possibly before events
+    // logged earlier); sort is stable for events of the same second.
+    return [...this.sent]
+      .sort((a, b) => a.created - b.created)
+      .filter((e) => e.created >= from)
+      .map((e) => JSON.parse(e.body.toString("utf8")) as unknown);
   }
 
-  private async emit(type: string, session: MockSession): Promise<SignedDelivery> {
-    const delivery = this.event(type, session);
+  /**
+   * Stripe expires every open session at its expires_at, touched or not, and dates the event then. The mock has no
+   * timer, so every call sweeps first: each open session past its expiry is expired and its event sent, dated at
+   * expires_at (review rounds 5 and 6: a session nobody touched never logged its expiry, and one noticed late was
+   * dated when noticed).
+   */
+  private async sweep(): Promise<void> {
+    const now = this.now();
+    for (const session of this.sessions.values()) {
+      if (session.status === "open" && now >= session.expiresAt) {
+        session.status = "expired";
+        await this.emit("checkout.session.expired", session, session.expiresAt);
+      }
+    }
+  }
+
+  private async emit(type: string, session: MockSession, created?: number): Promise<SignedDelivery> {
+    const delivery = this.event(type, session, created);
     // Logged before delivery, as Stripe records an event whether or not its webhook gets through.
     this.sent.push({ created: (JSON.parse(delivery.body.toString("utf8")) as { created: number }).created, body: delivery.body });
     const answer = await this.options.deliver?.(delivery);
