@@ -23,7 +23,8 @@ export interface WebhookDeps {
 
 export interface WebhookResponse {
   status: number;
-  body: { result: string; reason?: string; outcome?: string };
+  /** `applied`: set on a 500 whose event was applied (processed or a duplicate) but whose after-effects failed. */
+  body: { result: string; reason?: string; outcome?: string; applied?: "processed" | "duplicate" };
 }
 
 export async function handleStripeWebhook(body: Uint8Array, header: string | null, deps: WebhookDeps): Promise<WebhookResponse> {
@@ -51,7 +52,7 @@ export async function applyParsed(parsed: ParsedWebhook, deps: Omit<WebhookDeps,
       } catch (error) {
         // The event stays applied; Stripe's retry will be a duplicate that runs the after-effects again.
         console.error(`billing: after-effects of ${event.id} (${outcome}) failed: ${(error as Error).message}`);
-        return { status: 500, body: { result: "error", reason: "after-effects failed" } };
+        return { status: 500, body: { result: "error", reason: "after-effects failed", applied: result.kind } };
       }
     }
     return result.kind === "duplicate"

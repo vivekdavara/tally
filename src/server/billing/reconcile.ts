@@ -15,23 +15,30 @@ export interface ReconcileReport {
   ignored: number;
   /** Not applied (unknown session, refused, failed); the next run tries them again. */
   notApplied: { eventId: string | null; status: number; result: string }[];
+  /**
+   * Applied (counted above as processed or duplicate), but their after-effects failed (a stale link not yet expired);
+   * the next run, or Stripe's redelivery, runs them again (review round 5: these were reported as not applied).
+   */
+  afterEffectsFailed: string[];
 }
 
 export async function reconcileEvents(source: EventSource, since: Date, deps: Omit<WebhookDeps, "secret" | "now">): Promise<ReconcileReport> {
   const events = await source.listEvents(since);
-  const report: ReconcileReport = { fetched: events.length, processed: 0, duplicate: 0, ignored: 0, notApplied: [] };
+  const report: ReconcileReport = { fetched: events.length, processed: 0, duplicate: 0, ignored: 0, notApplied: [], afterEffectsFailed: [] };
   // Oldest first, as they happened; statuses only move forward, so the order matters for the outcomes recorded, not
   // for where payments end up.
   for (const raw of events) {
     const answer = await applyParsed(parseFetchedEvent(raw), deps);
     const result = answer.body.result;
-    if (answer.status === 200 && result === "processed") report.processed += 1;
+    const id = (raw as { id?: unknown } | null)?.id;
+    const eventId = typeof id === "string" ? id : null;
+    if (answer.body.applied) {
+      report[answer.body.applied] += 1;
+      report.afterEffectsFailed.push(eventId ?? "(no id)");
+    } else if (answer.status === 200 && result === "processed") report.processed += 1;
     else if (answer.status === 200 && result === "duplicate") report.duplicate += 1;
     else if (answer.status === 200 && result === "ignored") report.ignored += 1;
-    else {
-      const id = (raw as { id?: unknown } | null)?.id;
-      report.notApplied.push({ eventId: typeof id === "string" ? id : null, status: answer.status, result });
-    }
+    else report.notApplied.push({ eventId, status: answer.status, result });
   }
   return report;
 }

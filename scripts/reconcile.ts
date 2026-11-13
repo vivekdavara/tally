@@ -7,7 +7,8 @@
 //
 // Stripe mode only: the mock provider's event log lives in the server process that sent the events, so there is
 // nothing to fetch from here (tests/integration/reconcile.test.ts runs it in-process against the mock). Prints a JSON
-// report; exits 1 if any event couldn't be applied (they are tried again on the next run).
+// report; exits 1 if any event couldn't be applied, or was applied but its after-effects failed (both are tried again
+// on the next run).
 import { readBillingConfig } from "../src/server/billing/config";
 import { reconcileEvents } from "../src/server/billing/reconcile";
 import { expireOthersWhenPaid } from "../src/server/billing/service";
@@ -48,7 +49,7 @@ try {
     afterApplied: expireOthersWhenPaid(stripe, (event) => (fn) => withTenant(event.organizationId, fn, db)),
   });
   console.log(JSON.stringify(report, null, 2));
-  if (report.notApplied.length > 0) process.exitCode = 1;
+  if (report.notApplied.length > 0 || report.afterEffectsFailed.length > 0) process.exitCode = 1;
 } finally {
   await db.$disconnect();
 }

@@ -86,7 +86,7 @@ export class MockProvider implements BillingProvider, EventSource {
   }
 
   async expireCheckoutSession(id: string): Promise<void> {
-    const session = this.open(id);
+    const session = await this.open(id);
     session.status = "expired";
     await this.emit("checkout.session.expired", session);
   }
@@ -101,7 +101,7 @@ export class MockProvider implements BillingProvider, EventSource {
    * session completes unpaid and the money arrives, or doesn't, later (settle()).
    */
   async pay(id: string, method: "card" | "bank" = "card"): Promise<SignedDelivery> {
-    const session = this.open(id);
+    const session = await this.open(id);
     session.status = "complete";
     session.paymentIntent = `pi_mock_${hex(12)}`;
     session.paymentStatus = method === "card" ? "paid" : "unpaid";
@@ -120,7 +120,7 @@ export class MockProvider implements BillingProvider, EventSource {
 
   /** Lets an open session run out, as Stripe does at expires_at. */
   async lapse(id: string): Promise<SignedDelivery> {
-    const session = this.open(id);
+    const session = await this.open(id);
     session.status = "expired";
     return this.emit("checkout.session.expired", session);
   }
@@ -173,12 +173,14 @@ export class MockProvider implements BillingProvider, EventSource {
     return { eventId, type, body, header: signatureHeader(this.options.webhookSecret, this.now(), body) };
   }
 
-  private open(id: string): MockSession {
+  private async open(id: string): Promise<MockSession> {
     const session = this.sessions.get(id);
     if (!session) throw new ProviderError("No such checkout session", "resource_missing", false);
     if (session.status !== "open") throw new ProviderError(`the session is ${session.status}, not open`, "session_not_open", false);
     if (this.now() >= session.expiresAt) {
+      // It ran out: Stripe sends checkout.session.expired for that too (review round 5: the mock sent nothing).
       session.status = "expired";
+      await this.emit("checkout.session.expired", session);
       throw new ProviderError("the session has expired", "session_not_open", false);
     }
     return session;

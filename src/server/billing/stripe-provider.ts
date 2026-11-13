@@ -93,10 +93,16 @@ export class StripeProvider implements BillingProvider, EventSource {
         ...(after ? [["starting_after", after] as [string, string]] : []),
       ]);
       const json = await this.request("GET", `/v1/events?${query}`, undefined, undefined);
-      const data = Array.isArray(json.data) ? (json.data as { id?: unknown }[]) : [];
+      // An answer that can't be read is an error, never the end of the log: reconciliation would otherwise report
+      // success with events missing (review round 5).
+      if (!Array.isArray(json.data) || typeof json.has_more !== "boolean") {
+        throw new ProviderError("Stripe returned an event list Tally can't read", "bad_response", false);
+      }
+      const data = json.data as { id?: unknown }[];
       events.push(...data);
+      if (!json.has_more) return events.reverse();
       const last = data.at(-1)?.id;
-      if (json.has_more !== true || typeof last !== "string") return events.reverse();
+      if (typeof last !== "string") throw new ProviderError("Stripe said there are more events but gave no id to continue from", "bad_response", true);
       after = last;
     }
     throw new ProviderError("more than 5,000 events to reconcile; use a later `since`", "too_many_events", false);

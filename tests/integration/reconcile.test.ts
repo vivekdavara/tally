@@ -75,9 +75,9 @@ describe("reconcileEvents", () => {
     const { mock } = provider();
     await mock.pay(sessionIdOf(ok(await startCheckout(inv.run, inv.invoiceId, { provider: mock, ...checkout })).url));
     expect(await inv.status()).toEqual({ invoice: "OPEN", payments: ["PENDING"], events: 0 });
-    expect(await reconcileEvents(mock, since, deps)).toEqual({ fetched: 1, processed: 1, duplicate: 0, ignored: 0, notApplied: [] });
+    expect(await reconcileEvents(mock, since, deps)).toEqual({ fetched: 1, processed: 1, duplicate: 0, ignored: 0, notApplied: [], afterEffectsFailed: [] });
     expect(await inv.status()).toEqual({ invoice: "PAID", payments: ["SUCCEEDED"], events: 1 });
-    expect(await reconcileEvents(mock, since, deps)).toEqual({ fetched: 1, processed: 0, duplicate: 1, ignored: 0, notApplied: [] });
+    expect(await reconcileEvents(mock, since, deps)).toEqual({ fetched: 1, processed: 0, duplicate: 1, ignored: 0, notApplied: [], afterEffectsFailed: [] });
     expect(await inv.status()).toEqual({ invoice: "PAID", payments: ["SUCCEEDED"], events: 1 });
   });
 
@@ -88,7 +88,7 @@ describe("reconcileEvents", () => {
     await mock.pay(id, "bank");
     await mock.settle(id, true);
     const report = await reconcileEvents(mock, since, deps);
-    expect(report).toMatchObject({ fetched: 2, processed: 2, notApplied: [] });
+    expect(report).toMatchObject({ fetched: 2, processed: 2, notApplied: [], afterEffectsFailed: [] });
     const outcomes = await inv.run((tx) => tx.stripeEvent.findMany({ orderBy: { receivedAt: "asc" }, select: { outcome: true } }));
     expect(outcomes.map((o) => o.outcome)).toEqual(["payment-processing", "invoice-paid"]);
   });
@@ -121,7 +121,7 @@ describe("reconcileEvents", () => {
     const lateA = mock.event("checkout.session.completed", { ...mock.session(a)!, status: "complete", paymentStatus: "paid", paymentIntent: "pi_mock_late" });
     const source = { listEvents: async () => [JSON.parse(lateA.body.toString())] };
     const withHook = { ...deps, afterApplied: expireOthersWhenPaid(mock, (event) => (fn) => withTenant(event.organizationId, fn, app)) };
-    expect(await reconcileEvents(source, since, withHook)).toMatchObject({ processed: 1, notApplied: [] });
+    expect(await reconcileEvents(source, since, withHook)).toMatchObject({ processed: 1, notApplied: [], afterEffectsFailed: [] });
     expect(mock.session(b)!.status).toBe("expired");
   });
 
@@ -140,7 +140,7 @@ describe("reconcileEvents", () => {
       idempotencyKey: `stray-${unique()}`,
     });
     const d = await mock.pay(stray.id);
-    expect(await reconcileEvents(mock, since, deps)).toEqual({ fetched: 1, processed: 0, duplicate: 0, ignored: 0, notApplied: [{ eventId: d.eventId, status: 404, result: "unknown-session" }] });
+    expect(await reconcileEvents(mock, since, deps)).toEqual({ fetched: 1, processed: 0, duplicate: 0, ignored: 0, notApplied: [{ eventId: d.eventId, status: 404, result: "unknown-session" }], afterEffectsFailed: [] });
     expect(await reconcileEvents(mock, new Date(Date.now() + 60_000), deps)).toMatchObject({ fetched: 0 });
   });
 });
