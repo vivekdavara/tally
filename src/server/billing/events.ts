@@ -14,7 +14,7 @@ export const HANDLED_TYPES = [
 ] as const;
 export type HandledType = (typeof HANDLED_TYPES)[number];
 
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 // Unknown fields are dropped (zod's default), so Stripe adding fields never breaks parsing.
 const envelope = z.object({
@@ -93,8 +93,9 @@ export function parseWebhook(body: Uint8Array, header: string | null, secret: st
   // retrying (for up to three days) while it's fixed, rather than acknowledge it unprocessed.
   if (!session.success) return { kind: "rejected", reason: "unexpected checkout session shape" };
   const s = session.data;
-  const organizationId = s.metadata?.organization_id;
-  const invoiceId = s.metadata?.invoice_id;
+  // Compared with ids Postgres prints in lower case, so normalised here whatever case a session was created with.
+  const organizationId = s.metadata?.organization_id?.toLowerCase();
+  const invoiceId = s.metadata?.invoice_id?.toLowerCase();
   // Sessions Tally didn't create (another integration on the same Stripe account) carry no such metadata.
   if (!organizationId || !invoiceId || !UUID.test(organizationId) || !UUID.test(invoiceId)) {
     return { kind: "ignored", reason: "not-a-tally-session", eventId: id };

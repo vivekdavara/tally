@@ -62,13 +62,21 @@ interface Plan {
  * so two clicks at once, or a retry after a crash between the call and the insert, get the same session; the
  * insert then keeps one row (ON CONFLICT on the session id).
  */
-export async function startCheckout(run: TenantRun, invoiceId: string, deps: CheckoutDeps): Promise<Result<{ url: string; reused: boolean }>> {
-  if (!UUID.test(invoiceId)) return fail("not-found");
+export async function startCheckout(run: TenantRun, givenId: string, deps: CheckoutDeps): Promise<Result<{ url: string; reused: boolean }>> {
+  if (!UUID.test(givenId)) return fail("not-found");
+  // Postgres reads a UUID in either case, but the id also goes into the session's metadata and the idempotency key,
+  // and events are matched on it: an upper-case id from the URL made every event for the session "not ours", so a
+  // paid checkout was never recorded (review of day 3). Lower case, as Postgres prints it, from here on.
+  const invoiceId = givenId.toLowerCase();
   const plan: Plan | Result<never> = await run(async (tx) => {
-    const invoice = await tx.invoice.findUnique({
-      where: { id: invoiceId },
-      select: { status: true, number: true, currency: true, totalMinor: true, billToEmail: true },
-    });
+    // The invoice's row lock first: every payment insert and status change for this invoice takes it too, so the
+    // reads below (live attempt, attempt count) see one state. Without it, under READ COMMITTED each statement has
+    // its own snapshot: a click could miss a payment committed between them in the first and count it in the
+    // second, and ask the provider for attempt 2, a second session (found by the 8-click test on day 3).
+    const rows = await tx.$queryRaw<{ status: string; number: number | null; currency: string; totalMinor: bigint | null; billToEmail: string | null }[]>`
+      SELECT status::text AS status, number, currency, total_minor AS "totalMinor", bill_to_email AS "billToEmail"
+      FROM invoices WHERE id = ${invoiceId}::uuid FOR NO KEY UPDATE`;
+    const invoice = rows[0];
     if (!invoice) return fail("not-found");
     if (invoice.status !== "OPEN") return fail("not-open");
     if (!isCurrency(invoice.currency)) return fail("currency-not-chargeable");
@@ -120,6 +128,11 @@ export async function startCheckout(run: TenantRun, invoiceId: string, deps: Che
     const url = await run(async (tx) => {
       // Timestamps go to raw SQL as ISO strings with their zone, not as Dates: Prisma's adapter sends a Date without
       // one (src/server/db/client.ts pins sessions to UTC for that reason; this doesn't depend on it).
+      // Payment creation takes turns per invoice. Without this, two clicks storing the same session at once could
+      // both pass ON CONFLICT's check and the second then hit payments_one_live_per_invoice, a unique index that
+      // isn't the conflict target, so it errors instead of doing nothing (seen on day 3 once round 1 made that
+      // error visible). The invoice comes first, as in every other path.
+      await tx.$queryRaw`SELECT 1 FROM invoices WHERE id = ${invoiceId}::uuid FOR NO KEY UPDATE`;
       const inserted = await tx.$queryRaw<{ url: string }[]>`
         INSERT INTO payments (organization_id, invoice_id, provider, checkout_session_id, checkout_url, amount_minor, currency, expires_at)
         VALUES (NULLIF(current_setting('app.organization_id', true), '')::uuid, ${invoiceId}::uuid, ${deps.provider.name}, ${session.id},
@@ -139,7 +152,16 @@ export async function startCheckout(run: TenantRun, invoiceId: string, deps: Che
       await deps.provider.expireCheckoutSession(session.id).catch((e: unknown) => console.error(`billing: expiring ${session.id} failed: ${(e as Error).message}`));
       return fail("not-open");
     }
-    if (violatedUniqueConstraint(error) === "payments_one_live_per_invoice") return fail("checkout-busy");
+    if (violatedUniqueConstraint(error) === "payments_one_live_per_invoice") {
+      // Another session for this invoice was stored first. If it is this very session, that's just the other click's
+      // insert: share it. Otherwise this one was never shown to anyone, so end it.
+      const live = await run((tx) =>
+        tx.payment.findFirst({ where: { invoiceId, status: { in: ["PENDING", "PROCESSING"] } }, select: { checkoutSessionId: true, checkoutUrl: true } }),
+      );
+      if (live?.checkoutSessionId === session.id) return ok({ url: live.checkoutUrl, reused: false });
+      await deps.provider.expireCheckoutSession(session.id).catch((e: unknown) => console.error(`billing: expiring ${session.id} failed: ${(e as Error).message}`));
+      return fail("checkout-busy");
+    }
     throw error;
   }
 }
