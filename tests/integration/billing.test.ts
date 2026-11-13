@@ -5,7 +5,7 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { MockProvider, type SignedDelivery } from "@/server/billing/mock-provider";
 import type { BillingProvider, CheckoutRequest } from "@/server/billing/provider";
-import { expirePendingCheckouts, listPayments, startCheckout } from "@/server/billing/service";
+import { checkoutIdempotencyKey, expireOthersWhenPaid, expirePendingCheckouts, listPayments, startCheckout } from "@/server/billing/service";
 import { signatureHeader } from "@/server/billing/signature";
 import { handleStripeWebhook, type WebhookDeps } from "@/server/billing/webhook";
 import type { Db } from "@/server/db/client";
@@ -94,9 +94,9 @@ describe("startCheckout", () => {
       currency: "USD",
       description: "Invoice INV-0001 from Acme",
       metadata: { organization_id: org.id, invoice_id: invoiceId },
-      idempotencyKey: `tally-checkout-${invoiceId}-1`,
       successUrl: "http://localhost:8117/paid?status=success",
     });
+    expect(session.request.idempotencyKey).toMatch(new RegExp(`^tally-checkout-${invoiceId}-1-[0-9a-f]{16}$`));
     expect(ok(await startCheckout(org.run, invoiceId, checkoutDeps(provider)))).toEqual({ url: first.url, reused: true });
     expect((await state(org, invoiceId)).payments).toEqual([{ status: "PENDING", refundDue: false }]);
   });
@@ -151,7 +151,21 @@ describe("startCheckout", () => {
     expect((await state(org, invoiceId)).payments).toHaveLength(0);
     const retried = ok(await startCheckout(org.run, invoiceId, checkoutDeps(provider)));
     // The idempotency key (same invoice, same attempt) returned the session the crashed call created.
-    expect(provider.session(sessionIdOf(retried.url))!.request.idempotencyKey).toBe(`tally-checkout-${invoiceId}-1`);
+    expect(provider.session(sessionIdOf(retried.url))!.request.idempotencyKey).toMatch(new RegExp(`^tally-checkout-${invoiceId}-1-`));
+    expect((await state(org, invoiceId)).payments).toHaveLength(1);
+  });
+
+  it("isn't stuck when a retry after a crash asks for something else (the organization renamed)", async () => {
+    const org = await newOrg();
+    const invoiceId = await openInvoice(org);
+    const { provider } = mock();
+    let calls = 0;
+    const crashingRun: typeof org.run = (fn) => (++calls === 2 ? Promise.reject(new Error("crash")) : org.run(fn));
+    await expect(startCheckout(crashingRun, invoiceId, checkoutDeps(provider))).rejects.toThrow("crash");
+    // Same invoice, same attempt, different description: under a key without the digest, the provider refused it
+    // as a reused key (provider-error) and nothing would change until the key expired.
+    const renamed = ok(await startCheckout(org.run, invoiceId, { ...checkoutDeps(provider), organizationName: "Acme Renamed" }));
+    expect(provider.session(sessionIdOf(renamed.url))!.request.description).toBe("Invoice INV-0001 from Acme Renamed");
     expect((await state(org, invoiceId)).payments).toHaveLength(1);
   });
 
@@ -182,7 +196,7 @@ describe("startCheckout", () => {
     ok(await startCheckout(org.run, invoiceId, checkoutDeps(old)));
     const second = ok(await startCheckout(org.run, invoiceId, checkoutDeps(old)));
     expect(second.reused).toBe(false);
-    expect(old.session(sessionIdOf(second.url))!.request.idempotencyKey).toBe(`tally-checkout-${invoiceId}-2`);
+    expect(old.session(sessionIdOf(second.url))!.request.idempotencyKey).toMatch(new RegExp(`^tally-checkout-${invoiceId}-2-`));
     expect((await state(org, invoiceId)).payments.map((p) => p.status).sort()).toEqual(["EXPIRED", "PENDING"]);
     // Expired two minutes ago: inside the grace period it might still complete at Stripe, so no new link yet.
     const org2 = await newOrg();
@@ -265,7 +279,7 @@ describe("webhook events", () => {
     expect((await deliver(await provider.settle(id, false))).body.outcome).toBe("payment-failed");
     const again = ok(await startCheckout(org.run, invoiceId, checkoutDeps(provider)));
     expect(again.reused).toBe(false);
-    expect(provider.session(sessionIdOf(again.url))!.request.idempotencyKey).toBe(`tally-checkout-${invoiceId}-2`);
+    expect(provider.session(sessionIdOf(again.url))!.request.idempotencyKey).toMatch(new RegExp(`^tally-checkout-${invoiceId}-2-`));
   });
 
   it("an expired session ends the attempt; a late success still pays the invoice", async () => {
@@ -276,6 +290,26 @@ describe("webhook events", () => {
     const paid = provider.event("checkout.session.completed", provider.session(sessionId)!);
     expect((await deliver(paid)).body.outcome).toBe("invoice-paid");
     expect(await state(org, invoiceId)).toMatchObject({ invoice: "PAID", payments: [{ status: "SUCCEEDED", refundDue: false }] });
+  });
+
+  it("a late success on an abandoned attempt expires the invoice's newer link", async () => {
+    const org = await newOrg();
+    const invoiceId = await openInvoice(org);
+    const delivered: SignedDelivery[] = [];
+    let skew = 86_400 + 600;
+    const provider = new MockProvider({ webhookSecret: SECRET, now: () => Math.floor(Date.now() / 1000) - skew, deliver: async (d) => void delivered.push(d) });
+    const a = sessionIdOf(ok(await startCheckout(org.run, invoiceId, checkoutDeps(provider))).url);
+    skew = 0;
+    // A is past its expiry, so this marks it EXPIRED and makes B.
+    const b = sessionIdOf(ok(await startCheckout(org.run, invoiceId, checkoutDeps(provider))).url);
+    const withHook: WebhookDeps = { ...deps, afterApplied: expireOthersWhenPaid(provider, (event) => (fn) => withTenant(event.organizationId, fn, app)) };
+    const lateA = provider.event("checkout.session.completed", { ...provider.session(a)!, status: "complete", paymentStatus: "paid", paymentIntent: "pi_mock_late" });
+    expect((await handleStripeWebhook(lateA.body, lateA.header, withHook)).body.outcome).toBe("invoice-paid");
+    // B was expired at the provider, and its expiry event marks it.
+    expect(provider.session(b)!.status).toBe("expired");
+    const expiredB = delivered.find((d) => d.type === "checkout.session.expired")!;
+    expect((await deliver(expiredB)).body.outcome).toBe("payment-expired");
+    expect((await state(org, invoiceId)).payments.map((p) => p.status).sort()).toEqual(["EXPIRED", "SUCCEEDED"]);
   });
 
   it("money for an invoice already paid by hand is recorded and flagged for a refund", async () => {
@@ -392,16 +426,16 @@ describe("webhook requests that don't apply", () => {
     const invoiceId = await openInvoice(org);
     const { provider } = mock();
     // A session created at the provider whose row isn't in the database yet.
-    const session = await provider.createCheckoutSession({
+    const request = {
       amountMinor: 5342n,
-      currency: "USD",
+      currency: "USD" as const,
       description: "Invoice INV-0001 from Acme",
       customerEmail: (await org.run((tx) => tx.invoice.findUniqueOrThrow({ where: { id: invoiceId } }))).billToEmail!,
       successUrl: "http://localhost:8117/paid?status=success",
       cancelUrl: "http://localhost:8117/paid?status=canceled",
       metadata: { organization_id: org.id, invoice_id: invoiceId },
-      idempotencyKey: `tally-checkout-${invoiceId}-1`,
-    });
+    };
+    const session = await provider.createCheckoutSession({ ...request, idempotencyKey: checkoutIdempotencyKey(invoiceId, 1, request) });
     const early = await provider.pay(session.id);
     expect(await deliver(early)).toEqual({ status: 404, body: { result: "unknown-session" } });
     expect((await state(org, invoiceId)).events).toEqual([]);

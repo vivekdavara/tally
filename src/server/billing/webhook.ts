@@ -12,6 +12,11 @@ export interface WebhookDeps {
   organizationExists: (id: string) => Promise<boolean>;
   /** Unix seconds, for tests. */
   now?: number;
+  /**
+   * Runs after an event's transaction committed (the app: expire the invoice's other pending links once it is paid).
+   * Its failure is logged; the answer stays 200, since the event itself was applied.
+   */
+  afterApplied?: (event: VerifiedCheckoutEvent, outcome: string) => Promise<void>;
 }
 
 export interface WebhookResponse {
@@ -33,7 +38,14 @@ export async function handleStripeWebhook(body: Uint8Array, header: string | nul
     return { status: 500, body: { result: "error" } };
   }
   if (result.kind === "duplicate") return { status: 200, body: { result: "duplicate" } };
-  if (result.kind === "processed") return { status: 200, body: { result: "processed", outcome: result.outcome } };
+  if (result.kind === "processed") {
+    try {
+      await deps.afterApplied?.(event, result.outcome);
+    } catch (error) {
+      console.error(`billing: after ${event.id} (${result.outcome}): ${(error as Error).message}`);
+    }
+    return { status: 200, body: { result: "processed", outcome: result.outcome } };
+  }
   // No such session in that organization. A deleted organization's events will never apply: acknowledge them.
   // Otherwise the session's row may not be committed yet (the window between creating a session and storing it),
   // so ask Stripe to retry.

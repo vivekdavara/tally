@@ -1,8 +1,10 @@
 import { db } from "@/server/db/client";
 import { runForStripeEvent } from "@/server/dal";
 import { readBillingConfig, type BillingConfig } from "./config";
+import type { VerifiedCheckoutEvent } from "./events";
 import { MockProvider } from "./mock-provider";
 import type { BillingProvider } from "./provider";
+import { expireOthersWhenPaid } from "./service";
 import { StripeProvider } from "./stripe-provider";
 import { handleStripeWebhook, type WebhookDeps } from "./webhook";
 
@@ -32,6 +34,8 @@ export function billing(): Billing {
         : // The mock delivers its signed events straight to the webhook handler, in this process: the same
           // verification and processing as an HTTP delivery from Stripe, without the network.
           new MockProvider({ webhookSecret: config.webhookSecret, deliver: (d) => handleStripeWebhook(d.body, d.header, webhook) });
+    // Once an event pays an invoice, its other pending links are expired, in that event's organization.
+    webhook.afterApplied = expireOthersWhenPaid(provider, (event: VerifiedCheckoutEvent) => (fn) => runForStripeEvent(event, fn));
     cache.tallyBilling = { config, provider, webhook };
   }
   return cache.tallyBilling;

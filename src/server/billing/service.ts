@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { sqlState, violatedUniqueConstraint } from "@/server/db/errors";
 import type { TenantTx } from "@/server/db/tenant";
 import { invoiceLabel } from "@/server/invoices/format";
@@ -5,7 +6,7 @@ import { isCurrency, type Currency } from "@/server/invoices/money";
 import type { Result } from "@/server/invoices/service";
 import type { CheckoutEvent } from "./events";
 import { chargeability } from "./limits";
-import { ProviderError, type BillingProvider } from "./provider";
+import { ProviderError, type BillingProvider, type CheckoutRequest } from "./provider";
 
 // Collecting open invoices through the provider, and applying its events (DESIGN.md, "Billing").
 
@@ -46,6 +47,19 @@ export interface CheckoutDeps {
   provider: BillingProvider;
   appBaseUrl: string;
   organizationName: string;
+}
+
+/**
+ * The idempotency key for a checkout request: the invoice, the attempt number, and a digest of everything else the
+ * request says. Two clicks at once, or a retry after a crash, send the same request and get the same session. A
+ * request that differs (the organization renamed, APP_BASE_URL changed) gets a new key: under the old key Stripe
+ * would refuse it as a reused key with other parameters, a non-retryable error, and since nothing was stored the
+ * attempt number wouldn't move, so the invoice couldn't be collected for 24 hours (review suspicion). The session
+ * the crashed attempt created was never shown to anyone and expires on its own.
+ */
+export function checkoutIdempotencyKey(invoiceId: string, attempt: number, request: Omit<CheckoutRequest, "idempotencyKey">): string {
+  const digest = createHash("sha256").update(JSON.stringify({ ...request, amountMinor: request.amountMinor.toString() })).digest("hex");
+  return `tally-checkout-${invoiceId}-${attempt}-${digest.slice(0, 16)}`;
 }
 
 interface Plan {
@@ -103,20 +117,20 @@ export async function startCheckout(run: TenantRun, givenId: string, deps: Check
   if (plan.reuse) return ok({ url: plan.reuse.url, reused: true });
   const { attempt, organizationId, invoice } = plan as Required<Plan>;
 
+  const request = {
+    amountMinor: invoice.total,
+    currency: invoice.currency,
+    // Cut by code points: slice() counts UTF-16 units and could split an emoji's surrogate pair, which
+    // encodeURIComponent then refuses (URIError) when the Stripe client form-encodes it (review suspicion).
+    description: Array.from(`Invoice ${invoiceLabel(invoice.number)} from ${deps.organizationName}`).slice(0, 250).join(""),
+    customerEmail: invoice.email,
+    successUrl: `${deps.appBaseUrl}/paid?status=success`,
+    cancelUrl: `${deps.appBaseUrl}/paid?status=canceled`,
+    metadata: { organization_id: organizationId, invoice_id: invoiceId },
+  };
   let session;
   try {
-    session = await deps.provider.createCheckoutSession({
-      amountMinor: invoice.total,
-      currency: invoice.currency,
-      // Cut by code points: slice() counts UTF-16 units and could split an emoji's surrogate pair, which
-      // encodeURIComponent then refuses (URIError) when the Stripe client form-encodes it (review suspicion).
-      description: Array.from(`Invoice ${invoiceLabel(invoice.number)} from ${deps.organizationName}`).slice(0, 250).join(""),
-      customerEmail: invoice.email,
-      successUrl: `${deps.appBaseUrl}/paid?status=success`,
-      cancelUrl: `${deps.appBaseUrl}/paid?status=canceled`,
-      metadata: { organization_id: organizationId, invoice_id: invoiceId },
-      idempotencyKey: `tally-checkout-${invoiceId}-${attempt}`,
-    });
+    session = await deps.provider.createCheckoutSession({ ...request, idempotencyKey: checkoutIdempotencyKey(invoiceId, attempt, request) });
   } catch (error) {
     if (error instanceof ProviderError) {
       if (["amount-too-small", "amount-too-large", "currency-not-chargeable"].includes(error.code)) return fail(error.code);
@@ -187,6 +201,18 @@ export async function expirePendingCheckouts(run: TenantRun, invoiceId: string, 
     }
   }
   return expired;
+}
+
+/**
+ * WebhookDeps.afterApplied for the app: once an event has paid an invoice, end its other pending payment links. A
+ * late success on an attempt given up on (FAILED, EXPIRED) can pay the invoice while a newer link is still live, and
+ * the customer could pay that one too (review suspicion; it would be recorded with refund_due, but a refund costs
+ * fees and a support conversation).
+ */
+export function expireOthersWhenPaid<E extends CheckoutEvent>(provider: BillingProvider, runFor: (event: E) => TenantRun) {
+  return async (event: E, outcome: string): Promise<void> => {
+    if (outcome === "invoice-paid") await expirePendingCheckouts(runFor(event), event.invoiceId, provider);
+  };
 }
 
 // Webhook events -------------------------------------------------------------------------------------------------
