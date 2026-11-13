@@ -467,8 +467,11 @@ invoice's locks and a pooled connection):
    refuses (the invoice was paid or voided in between) or another session won, this session was never shown to
    anyone and is expired at the provider.
 
-Paying by hand or voiding expires the invoice's pending links afterwards; so does a webhook that pays the invoice
-(the handler's `afterApplied` hook, run after its transaction commits).
+Paying by hand or voiding expires the invoice's pending links afterwards (best effort: a link paid anyway is
+recorded with `refund_due`). So does a webhook that pays the invoice, through the handler's `afterApplied` hook, run
+after the event's transaction commits, and that one is not best effort (review round 2): it runs again on every
+redelivery of the event, with the outcome the first application stored, and a failure a retry could fix answers 500,
+so Stripe redelivers until the newer link is gone. A crash between the commit and the hook is covered the same way.
 
 ### Webhooks: authentic, then exactly once
 
@@ -503,12 +506,12 @@ kilobytes), then:
 | Answer | When | Stripe then |
 |---|---|---|
 | 200 processed (+ outcome) | applied | stops |
-| 200 duplicate | this event id was applied before | stops |
+| 200 duplicate | this event id was applied before (its after-effects run again) | stops |
 | 200 ignored | authentic, nothing to do (unhandled type, not Tally's, organization deleted) | stops |
 | 400 | bad or missing signature, stale timestamp, not an event, unreadable handled event | retries |
 | 404 unknown-session | the session isn't stored (yet): the window between creating a session and storing it | retries |
 | 413 | body over 256 KiB | retries |
-| 500 | processing failed; rolled back, nothing stored | retries |
+| 500 | processing failed (rolled back, nothing stored), or the after-effects of an applied event failed | retries |
 
 ### Time zones
 
