@@ -1,0 +1,256 @@
+import { sqlState, violatedUniqueConstraint } from "@/server/db/errors";
+import type { TenantTx } from "@/server/db/tenant";
+import { invoiceLabel } from "@/server/invoices/format";
+import { isCurrency, type Currency } from "@/server/invoices/money";
+import type { Result } from "@/server/invoices/service";
+import type { CheckoutEvent } from "./events";
+import { chargeability } from "./limits";
+import { ProviderError, type BillingProvider } from "./provider";
+
+// Collecting open invoices through the provider, and applying its events (DESIGN.md, "Billing").
+
+const ok = <T>(value: T): Result<T> => ({ ok: true, value });
+const fail = (reason: string): Result<never> => ({ ok: false, reason });
+
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** requireTenant(...).run, or withTenant bound to one organization in tests. */
+export type TenantRun = <T>(fn: (tx: TenantTx) => Promise<T>) => Promise<T>;
+
+/** A PENDING session isn't marked expired by Tally's own clock until this long after Stripe's expires_at. */
+export const LOCAL_EXPIRY_GRACE = "5 minutes";
+
+export interface PaymentView {
+  id: string;
+  status: "PENDING" | "PROCESSING" | "SUCCEEDED" | "FAILED" | "EXPIRED";
+  provider: string;
+  checkoutUrl: string;
+  amountMinor: bigint;
+  currency: string;
+  expiresAt: Date;
+  paidAt: Date | null;
+  refundDue: boolean;
+  createdAt: Date;
+}
+
+export async function listPayments(tx: TenantTx, invoiceId: string): Promise<PaymentView[]> {
+  if (!UUID.test(invoiceId)) return [];
+  return tx.payment.findMany({
+    where: { invoiceId },
+    orderBy: [{ createdAt: "desc" }, { id: "asc" }],
+    select: { id: true, status: true, provider: true, checkoutUrl: true, amountMinor: true, currency: true, expiresAt: true, paidAt: true, refundDue: true, createdAt: true },
+  });
+}
+
+export interface CheckoutDeps {
+  provider: BillingProvider;
+  appBaseUrl: string;
+  organizationName: string;
+}
+
+interface Plan {
+  reuse?: { url: string };
+  attempt?: number;
+  organizationId?: string;
+  invoice?: { number: number; currency: Currency; total: bigint; email: string };
+}
+
+/**
+ * A payment link for an open invoice: the live session if there is one, else a new checkout session for the
+ * invoice's stored total. The provider call happens between two transactions, never inside one (a slow provider
+ * would hold the invoice's locks and the connection). Its idempotency key is the invoice and the attempt number,
+ * so two clicks at once, or a retry after a crash between the call and the insert, get the same session; the
+ * insert then keeps one row (ON CONFLICT on the session id).
+ */
+export async function startCheckout(run: TenantRun, invoiceId: string, deps: CheckoutDeps): Promise<Result<{ url: string; reused: boolean }>> {
+  if (!UUID.test(invoiceId)) return fail("not-found");
+  const plan: Plan | Result<never> = await run(async (tx) => {
+    const invoice = await tx.invoice.findUnique({
+      where: { id: invoiceId },
+      select: { status: true, number: true, currency: true, totalMinor: true, billToEmail: true },
+    });
+    if (!invoice) return fail("not-found");
+    if (invoice.status !== "OPEN") return fail("not-open");
+    if (!isCurrency(invoice.currency)) return fail("currency-not-chargeable");
+    const allowed = chargeability(invoice.totalMinor!, invoice.currency);
+    if (!allowed.ok) return fail(allowed.reason);
+    // A pending session well past Stripe's expiry can no longer be paid: end it here, so a new one can be made.
+    await tx.$executeRaw`
+      UPDATE payments SET status = 'EXPIRED'
+      WHERE invoice_id = ${invoiceId}::uuid AND status = 'PENDING'
+        AND expires_at <= clock_timestamp() - ${LOCAL_EXPIRY_GRACE}::interval`;
+    const live = await tx.$queryRaw<{ url: string; usable: boolean }[]>`
+      SELECT checkout_url AS url, (status = 'PROCESSING' OR expires_at > clock_timestamp()) AS usable
+      FROM payments WHERE invoice_id = ${invoiceId}::uuid AND status IN ('PENDING', 'PROCESSING')`;
+    if (live[0]) return live[0].usable ? { reuse: { url: live[0].url } } : fail("checkout-expiring");
+    const attempt = (await tx.payment.count({ where: { invoiceId } })) + 1;
+    const tenant = await tx.$queryRaw<{ id: string }[]>`SELECT current_setting('app.organization_id', true) AS id`;
+    return {
+      attempt,
+      organizationId: tenant[0]!.id,
+      invoice: { number: invoice.number!, currency: invoice.currency, total: invoice.totalMinor!, email: invoice.billToEmail! },
+    };
+  });
+  if ("ok" in plan) return plan;
+  if (plan.reuse) return ok({ url: plan.reuse.url, reused: true });
+  const { attempt, organizationId, invoice } = plan as Required<Plan>;
+
+  let session;
+  try {
+    session = await deps.provider.createCheckoutSession({
+      amountMinor: invoice.total,
+      currency: invoice.currency,
+      description: `Invoice ${invoiceLabel(invoice.number)} from ${deps.organizationName}`.slice(0, 250),
+      customerEmail: invoice.email,
+      successUrl: `${deps.appBaseUrl}/paid?status=success`,
+      cancelUrl: `${deps.appBaseUrl}/paid?status=canceled`,
+      metadata: { organization_id: organizationId, invoice_id: invoiceId },
+      idempotencyKey: `tally-checkout-${invoiceId}-${attempt}`,
+    });
+  } catch (error) {
+    if (error instanceof ProviderError) {
+      if (["amount-too-small", "amount-too-large", "currency-not-chargeable"].includes(error.code)) return fail(error.code);
+      console.error(`billing: creating a checkout session failed (${error.code}${error.retryable ? ", retryable" : ""}): ${error.message}`);
+      return fail(error.retryable ? "provider-unavailable" : "provider-error");
+    }
+    throw error;
+  }
+
+  try {
+    const url = await run(async (tx) => {
+      // Timestamps go to raw SQL as ISO strings with their zone, not as Dates: Prisma's adapter sends a Date without
+      // one (src/server/db/client.ts pins sessions to UTC for that reason; this doesn't depend on it).
+      const inserted = await tx.$queryRaw<{ url: string }[]>`
+        INSERT INTO payments (organization_id, invoice_id, provider, checkout_session_id, checkout_url, amount_minor, currency, expires_at)
+        VALUES (NULLIF(current_setting('app.organization_id', true), '')::uuid, ${invoiceId}::uuid, ${deps.provider.name}, ${session.id},
+                ${session.url}, ${invoice.total}, ${invoice.currency}, ${session.expiresAt.toISOString()}::timestamptz)
+        ON CONFLICT (organization_id, checkout_session_id) DO NOTHING
+        RETURNING checkout_url AS url`;
+      if (inserted[0]) return inserted[0].url;
+      // The same session, inserted by a concurrent click: one row, the same link.
+      const existing = await tx.payment.findFirstOrThrow({ where: { checkoutSessionId: session.id }, select: { checkoutUrl: true } });
+      return existing.checkoutUrl;
+    });
+    return ok({ url, reused: false });
+  } catch (error) {
+    const state = sqlState(error);
+    if (state === "TL012" || state === "TL013") {
+      // Paid, voided or (impossibly) changed between the two transactions: nobody should pay this session.
+      await deps.provider.expireCheckoutSession(session.id).catch((e: unknown) => console.error(`billing: expiring ${session.id} failed: ${(e as Error).message}`));
+      return fail("not-open");
+    }
+    if (violatedUniqueConstraint(error) === "payments_one_live_per_invoice") return fail("checkout-busy");
+    throw error;
+  }
+}
+
+/**
+ * After an invoice is paid by hand or voided: ends its pending sessions at the provider, so the customer can't pay
+ * them. The provider then sends checkout.session.expired, which marks each payment EXPIRED. Best effort: a session
+ * that is paid anyway is still recorded, with refund_due set (processCheckoutEvent). PROCESSING payments can't be
+ * expired (the customer already submitted a bank debit).
+ */
+export async function expirePendingCheckouts(run: TenantRun, invoiceId: string, provider: BillingProvider): Promise<number> {
+  if (!UUID.test(invoiceId)) return 0;
+  const pending = await run((tx) => tx.payment.findMany({ where: { invoiceId, status: "PENDING", provider: provider.name }, select: { checkoutSessionId: true } }));
+  let expired = 0;
+  for (const { checkoutSessionId } of pending) {
+    try {
+      await provider.expireCheckoutSession(checkoutSessionId);
+      expired += 1;
+    } catch (error) {
+      console.error(`billing: expiring ${checkoutSessionId} failed: ${(error as Error).message}`);
+    }
+  }
+  return expired;
+}
+
+// Webhook events -------------------------------------------------------------------------------------------------
+
+export type EventResult =
+  | { kind: "processed"; outcome: string }
+  | { kind: "duplicate" }
+  /** No payment has this session in the event's organization: nothing was stored, so a retry can still apply it. */
+  | { kind: "unknown-session" };
+
+type Status = PaymentView["status"];
+
+/**
+ * Applies one verified event in its organization's transaction, exactly once:
+ * 1. find the payment by session id (row security limits this to the organization the event names);
+ * 2. insert the event id into stripe_events, ON CONFLICT DO NOTHING: a second delivery of the same event finds it
+ *    (or, while the first is still in flight, waits on its uncommitted key, then finds it) and changes nothing;
+ * 3. lock the invoice, then the payment (the same order as every other path, so no deadlock), and move them;
+ * 4. record what happened as the event's outcome.
+ * Payment statuses only move forward (payments_guard), so events arriving out of order can't undo each other: a
+ * success after a failure still records the money; a failure or expiry after a success is "stale".
+ */
+export async function processCheckoutEvent(tx: TenantTx, event: CheckoutEvent): Promise<EventResult> {
+  const found = await tx.payment.findFirst({ where: { checkoutSessionId: event.session.id }, select: { id: true, invoiceId: true } });
+  if (!found) return { kind: "unknown-session" };
+  const inserted = await tx.$queryRaw<{ id: string }[]>`
+    INSERT INTO stripe_events (id, organization_id, type, payment_id, stripe_created_at)
+    VALUES (${event.id}, NULLIF(current_setting('app.organization_id', true), '')::uuid, ${event.type}, ${found.id}::uuid,
+            ${event.created.toISOString()}::timestamptz)
+    ON CONFLICT (id) DO NOTHING
+    RETURNING id`;
+  if (inserted.length === 0) return { kind: "duplicate" };
+
+  const outcome = await apply(tx, event, found);
+  await tx.stripeEvent.update({ where: { id: event.id }, data: { outcome } });
+  return { kind: "processed", outcome };
+}
+
+async function apply(tx: TenantTx, event: CheckoutEvent, found: { id: string; invoiceId: string }): Promise<string> {
+  // The metadata is ours and signed, so this only fails on a bug: refuse to touch either row.
+  if (event.invoiceId !== found.invoiceId) return "invoice-mismatch";
+  const invoices = await tx.$queryRaw<{ status: string }[]>`
+    SELECT status::text AS status FROM invoices WHERE id = ${found.invoiceId}::uuid FOR NO KEY UPDATE`;
+  // FOR NO KEY UPDATE, not FOR UPDATE: the stripe_events insert's foreign-key check holds FOR KEY SHARE on this
+  // row, which FOR UPDATE conflicts with. Two different events for one payment then deadlocked (each held its key
+  // share and waited for the other's invoice lock; found by the concurrent-events test).
+  const payments = await tx.$queryRaw<{ status: Status; amount_minor: bigint; currency: string }[]>`
+    SELECT status, amount_minor, currency FROM payments WHERE id = ${found.id}::uuid FOR NO KEY UPDATE`;
+  const invoice = invoices[0]!;
+  const payment = payments[0]!;
+  const setStatus = (status: Status) => tx.payment.update({ where: { id: found.id }, data: { status } });
+
+  const succeeded =
+    event.type === "checkout.session.async_payment_succeeded" ||
+    (event.type === "checkout.session.completed" && event.session.paymentStatus === "paid");
+
+  if (succeeded) {
+    if (payment.status === "SUCCEEDED") return "already-succeeded";
+    const matches = event.session.amountTotal === payment.amount_minor && event.session.currency === payment.currency;
+    // Money arrived for an invoice that no longer wants it, or for the wrong amount: record it and flag a refund,
+    // never pay the invoice with it.
+    const refundDue = !matches || invoice.status !== "OPEN";
+    await tx.payment.update({
+      where: { id: found.id },
+      data: { status: "SUCCEEDED", paidAt: event.created, paymentIntentId: event.session.paymentIntent, refundDue },
+    });
+    if (!matches) return "amount-mismatch";
+    if (invoice.status === "OPEN") {
+      await tx.invoice.update({ where: { id: found.invoiceId }, data: { status: "PAID" } });
+      return "invoice-paid";
+    }
+    return invoice.status === "VOID" ? "refund-due-void" : "refund-due-paid";
+  }
+
+  if (event.type === "checkout.session.completed") {
+    // Completed but unpaid: a bank debit submitted, settling later. (no_payment_required can't happen: every
+    // session is for at least Stripe's minimum.)
+    if (event.session.paymentStatus !== "unpaid" || payment.status !== "PENDING") return "stale";
+    await setStatus("PROCESSING");
+    return "payment-processing";
+  }
+  if (event.type === "checkout.session.async_payment_failed") {
+    if (payment.status !== "PENDING" && payment.status !== "PROCESSING") return "stale";
+    await setStatus("FAILED");
+    return "payment-failed";
+  }
+  // checkout.session.expired
+  if (payment.status !== "PENDING") return "stale";
+  await setStatus("EXPIRED");
+  return "payment-expired";
+}

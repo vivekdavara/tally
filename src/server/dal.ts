@@ -1,6 +1,7 @@
 import { notFound, redirect } from "next/navigation";
 import { cache } from "react";
 import { auth } from "@/auth";
+import type { VerifiedCheckoutEvent } from "./billing/events";
 import { db } from "./db/client";
 import { withTenant, type TenantTx } from "./db/tenant";
 import { findMembership, type MembershipView } from "./orgs/memberships";
@@ -63,4 +64,14 @@ export async function requireTenant(slug: string): Promise<Tenant> {
   const membership = await requireMembership(slug);
   const organizationId = membership.organization.id;
   return { ...membership, run: (fn) => withTenant(organizationId, fn) };
+}
+
+/**
+ * The webhook's way in (src/app/api/stripe/webhook): a transaction for the organization a Stripe event names. There
+ * is no membership here; the authority is Stripe's signature over the event, which names the organization in the
+ * session metadata Tally wrote. The parameter's type can only come from parseWebhook after the signature verified.
+ * Row security still applies: the event's session must belong to that organization or nothing is found.
+ */
+export function runForStripeEvent<T>(event: VerifiedCheckoutEvent, fn: (tx: TenantTx) => Promise<T>): Promise<T> {
+  return withTenant(event.organizationId, fn);
 }
