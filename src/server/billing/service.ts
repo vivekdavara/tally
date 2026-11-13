@@ -233,13 +233,16 @@ async function expireSessions(provider: BillingProvider, sessionIds: string[]): 
  * answers 500 and Stripe redelivers; a redelivery is a duplicate, which runs this again. The name is kept from round 1.
  */
 export function expireOthersWhenPaid<E extends CheckoutEvent>(provider: BillingProvider, runFor: (event: E) => TenantRun) {
-  return async (event: E): Promise<void> => {
-    // One transaction for both reads: this runs after every event.
-    const pending = await runFor(event)(async (tx) => {
-      const invoice = await tx.invoice.findUnique({ where: { id: event.invoiceId }, select: { status: true } });
-      if (!invoice || invoice.status === "OPEN" || invoice.status === "DRAFT") return [];
-      return pendingSessions(tx, event.invoiceId, provider);
-    });
+  return async (event: E, outcome?: string, known?: StaleLink[]): Promise<void> => {
+    // The webhook handler passes what the event's own transaction found (processCheckoutEvent's staleLinks), which
+    // saves a transaction per event; called without it, this reads the same thing itself.
+    const pending = known
+      ? known.filter((l) => l.provider === provider.name).map((l) => l.checkoutSessionId)
+      : await runFor(event)(async (tx) => {
+          const invoice = await tx.invoice.findUnique({ where: { id: event.invoiceId }, select: { status: true } });
+          if (!invoice || invoice.status === "OPEN" || invoice.status === "DRAFT") return [];
+          return pendingSessions(tx, event.invoiceId, provider);
+        });
     if (pending.length === 0) return;
     const { retryable } = await expireSessions(provider, pending);
     if (retryable.length > 0) throw new Error(`couldn't expire ${retryable.join(", ")} yet`);
@@ -248,10 +251,24 @@ export function expireOthersWhenPaid<E extends CheckoutEvent>(provider: BillingP
 
 // Webhook events -------------------------------------------------------------------------------------------------
 
+/** A PENDING payment link on an invoice that is no longer open: nobody should be able to pay it. */
+export interface StaleLink {
+  checkoutSessionId: string;
+  provider: string;
+}
+
+/** The pending links of `invoiceId` if it is closed (PAID or VOID), read in the caller's transaction. */
+async function staleLinks(tx: TenantTx, invoiceId: string): Promise<StaleLink[]> {
+  return tx.$queryRaw<StaleLink[]>`
+    SELECT p.checkout_session_id AS "checkoutSessionId", p.provider
+    FROM payments p JOIN invoices i ON i.organization_id = p.organization_id AND i.id = p.invoice_id
+    WHERE p.invoice_id = ${invoiceId}::uuid AND p.status = 'PENDING' AND i.status IN ('PAID', 'VOID')`;
+}
+
 export type EventResult =
-  | { kind: "processed"; outcome: string }
+  | { kind: "processed"; outcome: string; staleLinks: StaleLink[] }
   /** Applied before; `outcome` is what that application recorded, so its after-effects can run again. */
-  | { kind: "duplicate"; outcome: string | null }
+  | { kind: "duplicate"; outcome: string | null; staleLinks: StaleLink[] }
   /** No payment has this session in the event's organization: nothing was stored, so a retry can still apply it. */
   | { kind: "unknown-session" };
 
@@ -278,12 +295,12 @@ export async function processCheckoutEvent(tx: TenantTx, event: CheckoutEvent): 
     RETURNING id`;
   if (inserted.length === 0) {
     const stored = await tx.stripeEvent.findUnique({ where: { id: event.id }, select: { outcome: true } });
-    return { kind: "duplicate", outcome: stored?.outcome ?? null };
+    return { kind: "duplicate", outcome: stored?.outcome ?? null, staleLinks: await staleLinks(tx, found.invoiceId) };
   }
 
   const outcome = await apply(tx, event, found);
   await tx.stripeEvent.update({ where: { id: event.id }, data: { outcome } });
-  return { kind: "processed", outcome };
+  return { kind: "processed", outcome, staleLinks: await staleLinks(tx, found.invoiceId) };
 }
 
 async function apply(tx: TenantTx, event: CheckoutEvent, found: { id: string; invoiceId: string }): Promise<string> {

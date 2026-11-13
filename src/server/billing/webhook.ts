@@ -1,6 +1,6 @@
 import type { TenantTx } from "@/server/db/tenant";
 import { parseWebhook, type VerifiedCheckoutEvent } from "./events";
-import { processCheckoutEvent } from "./service";
+import { processCheckoutEvent, type StaleLink } from "./service";
 
 // The webhook endpoint's logic (POST /api/stripe/webhook), without Next.js, so tests call it directly. What each
 // answer means to Stripe: any 2xx stops its retries; anything else is retried with backoff for up to three days.
@@ -18,7 +18,7 @@ export interface WebhookDeps {
    * must be idempotent; if they throw, the answer is 500 and Stripe redelivers (review round 2: run only on the first
    * delivery and with failures swallowed, a crash or a transient provider error left a second link payable).
    */
-  afterApplied?: (event: VerifiedCheckoutEvent, outcome: string) => Promise<void>;
+  afterApplied?: (event: VerifiedCheckoutEvent, outcome: string, staleLinks: StaleLink[]) => Promise<void>;
 }
 
 export interface WebhookResponse {
@@ -43,7 +43,7 @@ export async function handleStripeWebhook(body: Uint8Array, header: string | nul
     const outcome = result.outcome;
     if (outcome !== null && deps.afterApplied) {
       try {
-        await deps.afterApplied(event, outcome);
+        await deps.afterApplied(event, outcome, result.staleLinks);
       } catch (error) {
         // The event stays applied; Stripe's retry will be a duplicate that runs the after-effects again.
         console.error(`billing: after-effects of ${event.id} (${outcome}) failed: ${(error as Error).message}`);
