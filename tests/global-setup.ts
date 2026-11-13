@@ -27,6 +27,11 @@ export default async function setup(): Promise<() => Promise<void>> {
   try {
     // TRUNCATE isn't subject to row-level security; CASCADE reaches every table that references these.
     await client.query("TRUNCATE users, organizations CASCADE");
+    // Connections to the test database run in a time zone that isn't UTC, here and in CI (whose server is UTC), so
+    // a timestamp that loses its zone on the way in shows up as hours off instead of passing by luck (day 3: a Date
+    // sent to raw SQL was read as New York time). For connections opened after this, i.e. every test's.
+    const db = new URL(ownerUrl).pathname.slice(1);
+    await client.query(`ALTER DATABASE "${db.replaceAll('"', '""')}" SET timezone TO 'America/New_York'`);
   } finally {
     await client.end();
   }
