@@ -1,6 +1,6 @@
 import { randomBytes } from "node:crypto";
 import { chargeability } from "./limits";
-import { ProviderError, type BillingProvider, type CheckoutRequest, type CheckoutSession } from "./provider";
+import { ProviderError, type BillingProvider, type CheckoutRequest, type CheckoutSession, type EventSource } from "./provider";
 import { signatureHeader } from "./signature";
 
 // The default provider: Stripe's checkout sessions, in memory. It answers like Stripe where Tally depends on it
@@ -43,10 +43,12 @@ export interface MockProviderOptions {
 
 const hex = (bytes: number) => randomBytes(bytes).toString("hex");
 
-export class MockProvider implements BillingProvider {
+export class MockProvider implements BillingProvider, EventSource {
   readonly name = "mock" as const;
   private readonly sessions = new Map<string, MockSession>();
   private readonly keys = new Map<string, { fingerprint: string; sessionId: string }>();
+  /** Every event sent (not merely built), as Stripe keeps its event log: what listEvents returns. */
+  private readonly sent: { created: number; body: Buffer }[] = [];
 
   constructor(private readonly options: MockProviderOptions) {}
 
@@ -182,8 +184,15 @@ export class MockProvider implements BillingProvider {
     return session;
   }
 
+  async listEvents(since: Date): Promise<unknown[]> {
+    const from = Math.floor(since.getTime() / 1000);
+    return this.sent.filter((e) => e.created >= from).map((e) => JSON.parse(e.body.toString("utf8")) as unknown);
+  }
+
   private async emit(type: string, session: MockSession): Promise<SignedDelivery> {
     const delivery = this.event(type, session);
+    // Logged before delivery, as Stripe records an event whether or not its webhook gets through.
+    this.sent.push({ created: (JSON.parse(delivery.body.toString("utf8")) as { created: number }).created, body: delivery.body });
     const answer = await this.options.deliver?.(delivery);
     session.deliveries.push({ eventId: delivery.eventId, type, body: delivery.body, answer });
     return delivery;

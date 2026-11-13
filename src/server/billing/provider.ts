@@ -39,6 +39,15 @@ export interface BillingProvider {
   expireCheckoutSession(id: string): Promise<void>;
 }
 
+/** The provider's event log, for reconciliation (both providers implement it). */
+export interface EventSource {
+  /**
+   * The checkout-session events the provider created at or after `since`, oldest first, as the raw event objects a
+   * webhook would carry: reconciliation replays them for deliveries that never arrived.
+   */
+  listEvents(since: Date): Promise<unknown[]>;
+}
+
 /** A refusal or failure from the provider. `retryable`: the same call may succeed later (network, 429, 5xx). */
 export class ProviderError extends Error {
   constructor(

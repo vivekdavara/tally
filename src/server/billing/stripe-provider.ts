@@ -1,5 +1,5 @@
 import { chargeability } from "./limits";
-import { CHECKOUT_SESSION_ID, ProviderError, type BillingProvider, type CheckoutRequest, type CheckoutSession } from "./provider";
+import { CHECKOUT_SESSION_ID, ProviderError, type BillingProvider, type CheckoutRequest, type CheckoutSession, type EventSource } from "./provider";
 
 // Stripe's REST API, for test mode only, over fetch: two endpoints don't justify an SDK dependency, and a plain
 // client is easy to test against a local server that checks every request (tests/unit/stripe-provider.test.ts).
@@ -20,7 +20,7 @@ export function formEncode(fields: [string, string][]): string {
   return fields.map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`).join("&");
 }
 
-export class StripeProvider implements BillingProvider {
+export class StripeProvider implements BillingProvider, EventSource {
   readonly name = "stripe" as const;
   private readonly apiBase: string;
   private readonly fetchFn: typeof fetch;
@@ -76,10 +76,36 @@ export class StripeProvider implements BillingProvider {
    * Waiting briefly and asking again returns the first request's result, the shared session, instead of showing the
    * second click an error (review suspicion). Twice at most, 250 then 500 ms.
    */
+  /**
+   * GET /v1/events for the handled checkout-session types created at or after `since`: Stripe lists newest first, 100
+   * a page, so this follows starting_after while has_more (at most 50 pages, 5,000 events) and returns them oldest
+   * first. Stripe keeps events for 30 days.
+   */
+  async listEvents(since: Date): Promise<unknown[]> {
+    const types = ["checkout.session.completed", "checkout.session.async_payment_succeeded", "checkout.session.async_payment_failed", "checkout.session.expired"];
+    const events: unknown[] = [];
+    let after: string | undefined;
+    for (let page = 0; page < 50; page++) {
+      const query = formEncode([
+        ["limit", "100"],
+        ["created[gte]", String(Math.floor(since.getTime() / 1000))],
+        ...types.map((t): [string, string] => ["types[]", t]),
+        ...(after ? [["starting_after", after] as [string, string]] : []),
+      ]);
+      const json = await this.request("GET", `/v1/events?${query}`, undefined, undefined);
+      const data = Array.isArray(json.data) ? (json.data as { id?: unknown }[]) : [];
+      events.push(...data);
+      const last = data.at(-1)?.id;
+      if (json.has_more !== true || typeof last !== "string") return events.reverse();
+      after = last;
+    }
+    throw new ProviderError("more than 5,000 events to reconcile; use a later `since`", "too_many_events", false);
+  }
+
   private async post(path: string, body: string, idempotencyKey: string | undefined): Promise<Record<string, unknown>> {
     for (let attempt = 0; ; attempt++) {
       try {
-        return await this.postOnce(path, body, idempotencyKey);
+        return await this.request("POST", path, body, idempotencyKey);
       } catch (error) {
         const inFlight = error instanceof ProviderError && error.httpStatus === 409 && idempotencyKey !== undefined;
         if (!inFlight || attempt >= 2) throw error;
@@ -88,15 +114,13 @@ export class StripeProvider implements BillingProvider {
     }
   }
 
-  private async postOnce(path: string, body: string, idempotencyKey: string | undefined): Promise<Record<string, unknown>> {
-    const headers: Record<string, string> = {
-      Authorization: `Bearer ${this.options.secretKey}`,
-      "Content-Type": "application/x-www-form-urlencoded",
-    };
+  private async request(method: "GET" | "POST", path: string, body: string | undefined, idempotencyKey: string | undefined): Promise<Record<string, unknown>> {
+    const headers: Record<string, string> = { Authorization: `Bearer ${this.options.secretKey}` };
+    if (method === "POST") headers["Content-Type"] = "application/x-www-form-urlencoded";
     if (idempotencyKey) headers["Idempotency-Key"] = idempotencyKey;
     let response: Response;
     try {
-      response = await this.fetchFn(`${this.apiBase}${path}`, { method: "POST", headers, body, signal: AbortSignal.timeout(this.timeoutMs) });
+      response = await this.fetchFn(`${this.apiBase}${path}`, { method, headers, body, signal: AbortSignal.timeout(this.timeoutMs) });
     } catch (error) {
       // Timeouts and network failures: the request may or may not have reached Stripe, so only a retry with the
       // same idempotency key is safe, and that is what the caller's next attempt does.

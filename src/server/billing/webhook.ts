@@ -1,5 +1,5 @@
 import type { TenantTx } from "@/server/db/tenant";
-import { parseWebhook, type VerifiedCheckoutEvent } from "./events";
+import { parseWebhook, type ParsedWebhook, type VerifiedCheckoutEvent } from "./events";
 import { processCheckoutEvent, type StaleLink } from "./service";
 
 // The webhook endpoint's logic (POST /api/stripe/webhook), without Next.js, so tests call it directly. What each
@@ -27,7 +27,11 @@ export interface WebhookResponse {
 }
 
 export async function handleStripeWebhook(body: Uint8Array, header: string | null, deps: WebhookDeps): Promise<WebhookResponse> {
-  const parsed = parseWebhook(body, header, deps.secret, deps.now);
+  return applyParsed(parseWebhook(body, header, deps.secret, deps.now), deps);
+}
+
+/** What the handler does with a parsed event; reconciliation (reconcile.ts) feeds fetched events through it too. */
+export async function applyParsed(parsed: ParsedWebhook, deps: Omit<WebhookDeps, "secret" | "now">): Promise<WebhookResponse> {
   if (parsed.kind === "rejected") return { status: 400, body: { result: "rejected", reason: parsed.reason } };
   if (parsed.kind === "ignored") return { status: 200, body: { result: "ignored", reason: parsed.reason } };
   const { event } = parsed;

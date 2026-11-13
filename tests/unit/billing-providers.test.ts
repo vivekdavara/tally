@@ -292,6 +292,28 @@ describe("StripeProvider against a stand-in for api.stripe.com", () => {
     expect(seen).toHaveLength(0);
   });
 
+  it("lists events since a time, following pages, oldest first", async () => {
+    seen.length = 0;
+    const page = (ids: string[], hasMore: boolean) => ({ object: "list", has_more: hasMore, data: ids.map((id) => ({ id, object: "event" })) });
+    respond = (req, res) => json(res, 200, new URL(req.url, "http://x").searchParams.get("starting_after") === "evt_3" ? page(["evt_2", "evt_1"], false) : page(["evt_5", "evt_4", "evt_3"], true));
+    const events = (await stripe().listEvents(new Date(1_763_000_000_000))) as { id: string }[];
+    expect(events.map((e) => e.id)).toEqual(["evt_1", "evt_2", "evt_3", "evt_4", "evt_5"]);
+    expect(seen.map((r) => r.method)).toEqual(["GET", "GET"]);
+    const first = new URL(seen[0]!.url, "http://x");
+    expect(first.pathname).toBe("/v1/events");
+    expect(first.searchParams.get("created[gte]")).toBe("1763000000");
+    expect(first.searchParams.get("limit")).toBe("100");
+    expect(first.searchParams.getAll("types[]")).toEqual([
+      "checkout.session.completed",
+      "checkout.session.async_payment_succeeded",
+      "checkout.session.async_payment_failed",
+      "checkout.session.expired",
+    ]);
+    expect(new URL(seen[1]!.url, "http://x").searchParams.get("starting_after")).toBe("evt_3");
+    expect(seen[0]!.headers.authorization).toBe(`Bearer ${KEY}`);
+    expect(seen[0]!.headers["content-type"]).toBeUndefined();
+  });
+
   it("encodes reserved characters in keys and values", () => {
     expect(formEncode([["metadata[a b]", "x&y=z/é"]])).toBe("metadata%5Ba%20b%5D=x%26y%3Dz%2F%C3%A9");
   });

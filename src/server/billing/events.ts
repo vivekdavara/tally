@@ -55,9 +55,10 @@ export interface CheckoutEvent {
 declare const verified: unique symbol;
 
 /**
- * A CheckoutEvent whose signature was checked. Only parseWebhook makes one, and the data access layer's
- * runForStripeEvent takes only this type: an organization id reaches withTenant from a webhook only after the
- * signature over it verified.
+ * A CheckoutEvent known to come from the provider. Only two functions make one: parseWebhook, after the signature
+ * over the body verified, and parseFetchedEvent, for events Tally fetched itself from the provider's API with its own
+ * key (reconciliation). The data access layer's runForStripeEvent takes only this type: an organization id reaches
+ * withTenant from a provider event only once the event is known to be authentic.
  */
 export type VerifiedCheckoutEvent = CheckoutEvent & { readonly [verified]: true };
 
@@ -81,6 +82,18 @@ export function parseWebhook(body: Uint8Array, header: string | null, secret: st
   } catch {
     return { kind: "rejected", reason: "body is not JSON" };
   }
+  return interpret(json);
+}
+
+/**
+ * An event Tally fetched from the provider's API (GET /v1/events with its secret key, over TLS): authentic by the
+ * channel, so there is no signature to check. Used by reconciliation (reconcile.ts).
+ */
+export function parseFetchedEvent(json: unknown): ParsedWebhook {
+  return interpret(json);
+}
+
+function interpret(json: unknown): ParsedWebhook {
   const event = envelope.safeParse(json);
   if (!event.success) return { kind: "rejected", reason: "body is not a Stripe event" };
   const { id, type, created, livemode, data } = event.data;
