@@ -148,7 +148,7 @@ and everything else runs.
 Apple M3 laptop (macOS 26.6.2, Node 23.11, Postgres 14.20), no review agent running during the benchmarks, load
 average 3.4 to 4.7 (other processes). The no-hook runs were on battery, the later ones on AC. Synthetic data.
 
-- **Tests:** 534 Vitest tests in 64 files (`npm run check`, 32.7 s, files one at a time), 142 of them new today; 22
+- **Tests:** 538 Vitest tests in 67 files (`npm run check`, 34.4 s, files one at a time), 146 of them new today; 22
   Playwright tests (`npm run e2e`, 15.1 s), 6 new. Among the new: the signature scheme checked against `openssl dgst
   -hmac`; the Stripe client's every request checked by a local stand-in for api.stripe.com (form encoding, bearer key,
   idempotency key, error mapping, timeout, the 409 wait); the payment guards through raw SQL as the app and as a
@@ -157,7 +157,7 @@ average 3.4 to 4.7 (other processes). The no-hook runs were on battery, the late
   recovers the same session; **one event delivered 10 times at once: one "processed", nine "duplicate"**; events out
   of order, late, for the wrong amount, for a paid or void invoice, and naming another organization; time zones
   through Prisma on a New York database; reconciliation after lost deliveries (applied once, in order, a second run
-  all duplicates); the four review rounds' findings (`tests/review-d3/` to `tests/review-d3r4/`); e2e of a card payment and a bank debit through the mock checkout page (a resent event
+  all duplicates); the five review rounds' findings (`tests/review-d3/` to `tests/review-d3r5/`); e2e of a card payment and a bank debit through the mock checkout page (a resent event
   answers "duplicate"), voiding expiring the link, and the webhook route over HTTP (unsigned, forged, stale,
   oversized).
 - **What the webhook path costs** (`npm run bench:webhook` on the final code, `524de2c`, run twice on AC; 2,000 events
@@ -275,7 +275,7 @@ All measured on an Apple M3 laptop (macOS 26.6.2, Node 23.11, Postgres 14.20), o
 
 ### Day 3
 
-Four review agents, one after another, each in its own worktree and database, findings as failing tests; every
+Five review agents, one after another, each in its own worktree and database, findings as failing tests; every
 finding reproduced here before fixing (durations are the agents' own run times).
 
 - **Round 1** (at `b47a6ba`, 6.4 minutes, `tests/review-d3/`): **an upper-case invoice id lost the payment.** The URL
@@ -307,7 +307,13 @@ finding reproduced here before fixing (durations are the agents' own run times).
   failure except "already closed" meant **a permanent refusal kept every event for the invoice at 500** until Stripe
   gave up (and might disable the endpoint). Now only what the provider marks retryable is retried; refusals are logged.
   Checked by mutation (undoing the client's plain-text 429 fix fails round 3's test again). As on Canary, Orderly and
-  Pathfinder, every round found bugs in the previous round's fix (2, 2, 2, 1 here); stopped after four for time.
+  Pathfinder, every round found bugs in the previous round's fix (2, 2, 2, 1 here).
+- **Round 5** (at `fc77f80`, on reconciliation, which no reviewer had seen, 2.2 minutes, `tests/review-d3r5/`): three
+  findings. **A Stripe event list Tally couldn't read** (no `data` array, or `has_more` with an empty page) was taken
+  for the end of the log, so reconciliation reported success with events missing; it now throws. **An event applied
+  whose after-effects failed** was reported as not applied; the 500's body now says it was applied, and the report
+  counts it and lists it separately. **The mock let a session run out silently**; like Stripe, it now sends the
+  expiry. Each checked as a mutation. Stopped after five rounds for time.
 
 ### Day 2
 

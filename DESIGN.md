@@ -527,7 +527,8 @@ the same apply step a delivery takes (`applyParsed`, shared with the webhook han
 own key over TLS is authentic by the channel, so `parseFetchedEvent` skips the signature; it and `parseWebhook` are
 the only makers of a `VerifiedCheckoutEvent`. The inbox makes any number of runs safe: what was applied answers
 "duplicate" (and re-runs its after-effects); what couldn't be applied (an unknown session) is reported and tried on the
-next run. `npm run reconcile -- <hours>` runs it against Stripe; in mock mode the log lives in the server process, so
+next run, and so is an event applied whose after-effects failed (reported apart from those). An event list the
+provider returns that can't be read or continued is an error, never the end of the log. `npm run reconcile -- <hours>` runs it against Stripe; in mock mode the log lives in the server process, so
 the tests run it in-process.
 
 ### Time zones

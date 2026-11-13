@@ -392,7 +392,9 @@ and 3 each found two bugs in the previous round's fix, all about that last one: 
 swallowed transient errors (now duplicates re-run it and a retryable failure answers 500), it took a plain-text 429
 for a permanent refusal, and it ignored a "refund-due-paid" event that followed a failed expiry after marking paid by
 hand (now it acts whenever the invoice is closed). Round 4 then caught round 3 overcorrecting: retrying every
-failure meant a permanent refusal kept the endpoint at 500 for days; now only what the provider calls retryable is. The lesson I took: a side effect after a commit needs a retry path,
+failure meant a permanent refusal kept the endpoint at 500 for days; now only what the provider calls retryable is. Round 5 read the new
+reconciliation code and found it could claim success it hadn't earned: a malformed page of Stripe's event list read
+as "no more events", and an applied event reported as unapplied. The lesson I took: a side effect after a commit needs a retry path,
 and "best effort" is a decision to write down, not a default.
 
 **What if your webhook endpoint is down for four days?**
