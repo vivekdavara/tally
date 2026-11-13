@@ -101,6 +101,19 @@ describe("startCheckout", () => {
     expect((await state(org, invoiceId)).payments).toEqual([{ status: "PENDING", refundDue: false }]);
   });
 
+  it("cuts a long description by characters, never through an emoji (it must stay valid UTF-16)", async () => {
+    const org = await newOrg();
+    const invoiceId = await openInvoice(org);
+    const { provider } = mock();
+    // "Invoice INV-0001 from " is 22 characters: the 250th UTF-16 unit falls inside the first emoji.
+    const name = `${"a".repeat(227)}😀😀`;
+    const { url } = ok(await startCheckout(org.run, invoiceId, { ...checkoutDeps(provider), organizationName: name }));
+    const description = provider.session(sessionIdOf(url))!.request.description;
+    expect(description.isWellFormed()).toBe(true);
+    expect([...description]).toHaveLength(250);
+    expect(() => encodeURIComponent(description)).not.toThrow();
+  });
+
   it("refuses a missing, draft, paid or void invoice, and amounts Stripe won't take", async () => {
     const org = await newOrg();
     const { provider } = mock();

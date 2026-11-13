@@ -45,6 +45,8 @@ export class ProviderError extends Error {
     message: string,
     readonly code: string,
     readonly retryable: boolean,
+    /** The HTTP status, when the provider answered one. */
+    readonly httpStatus?: number,
   ) {
     super(message);
   }

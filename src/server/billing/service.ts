@@ -108,7 +108,9 @@ export async function startCheckout(run: TenantRun, givenId: string, deps: Check
     session = await deps.provider.createCheckoutSession({
       amountMinor: invoice.total,
       currency: invoice.currency,
-      description: `Invoice ${invoiceLabel(invoice.number)} from ${deps.organizationName}`.slice(0, 250),
+      // Cut by code points: slice() counts UTF-16 units and could split an emoji's surrogate pair, which
+      // encodeURIComponent then refuses (URIError) when the Stripe client form-encodes it (review suspicion).
+      description: Array.from(`Invoice ${invoiceLabel(invoice.number)} from ${deps.organizationName}`).slice(0, 250).join(""),
       customerEmail: invoice.email,
       successUrl: `${deps.appBaseUrl}/paid?status=success`,
       cancelUrl: `${deps.appBaseUrl}/paid?status=canceled`,

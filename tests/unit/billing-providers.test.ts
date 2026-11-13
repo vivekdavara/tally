@@ -250,6 +250,20 @@ describe("StripeProvider against a stand-in for api.stripe.com", () => {
     expect(error.message).not.toContain(KEY);
   });
 
+  it("waits out a 409 for an idempotent request still in flight, then gets the shared session", async () => {
+    seen.length = 0;
+    let calls = 0;
+    respond = (_req, res) =>
+      ++calls === 1
+        ? json(res, 409, { error: { type: "idempotency_error", message: "There is currently another in-progress request using this Idempotent Key" } })
+        : json(res, 200, { id: "cs_test_shared", url: "https://checkout.stripe.com/c/pay/cs_test_shared", expires_at: 1_763_136_000 });
+    expect((await stripe().createCheckoutSession(request())).id).toBe("cs_test_shared");
+    expect(seen.map((r) => r.headers["idempotency-key"])).toEqual(["tally-checkout-b-1", "tally-checkout-b-1"]);
+    // Three 409s in a row: it gives up, retryable.
+    respond = (_req, res) => json(res, 409, { error: { type: "idempotency_error", message: "in progress" } });
+    expect(await refusal(stripe().createCheckoutSession(request()))).toMatchObject({ code: "idempotency_error", retryable: true, httpStatus: 409 });
+  });
+
   it("treats a response that isn't JSON, or a session it can't read, as an error", async () => {
     respond = (_req, res) => {
       res.writeHead(502, { "Content-Type": "text/html" });

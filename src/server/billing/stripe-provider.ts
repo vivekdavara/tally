@@ -71,7 +71,24 @@ export class StripeProvider implements BillingProvider {
     await this.post(`/v1/checkout/sessions/${id}/expire`, "", undefined);
   }
 
+  /**
+   * Stripe answers 409 while another request with the same idempotency key is still in flight (two clicks at once).
+   * Waiting briefly and asking again returns the first request's result, the shared session, instead of showing the
+   * second click an error (review suspicion). Twice at most, 250 then 500 ms.
+   */
   private async post(path: string, body: string, idempotencyKey: string | undefined): Promise<Record<string, unknown>> {
+    for (let attempt = 0; ; attempt++) {
+      try {
+        return await this.postOnce(path, body, idempotencyKey);
+      } catch (error) {
+        const inFlight = error instanceof ProviderError && error.httpStatus === 409 && idempotencyKey !== undefined;
+        if (!inFlight || attempt >= 2) throw error;
+        await new Promise((resolve) => setTimeout(resolve, 250 * 2 ** attempt));
+      }
+    }
+  }
+
+  private async postOnce(path: string, body: string, idempotencyKey: string | undefined): Promise<Record<string, unknown>> {
     const headers: Record<string, string> = {
       Authorization: `Bearer ${this.options.secretKey}`,
       "Content-Type": "application/x-www-form-urlencoded",
@@ -97,7 +114,7 @@ export class StripeProvider implements BillingProvider {
       // 409: an idempotent request still in flight; 429: rate limited; 5xx: Stripe's side.
       const retryable = response.status === 409 || response.status === 429 || response.status >= 500;
       // Stripe's message only: it never contains the key, and the key is never logged here.
-      throw new ProviderError(typeof error.message === "string" ? error.message : `Stripe answered ${response.status}`, code, retryable);
+      throw new ProviderError(typeof error.message === "string" ? error.message : `Stripe answered ${response.status}`, code, retryable, response.status);
     }
     return json;
   }
