@@ -322,9 +322,87 @@ already aborted, which `withTenant`'s day-1 guard turns into an error at commit 
 on code I'd just written); and bold text measured with regular widths. Plus a migration that Prisma applied only
 halfway when an old row broke a new CHECK.
 
+## Billing (day 3)
+
+**How does an invoice get paid?**
+Staff click "Create payment link" on an open invoice. `startCheckout` (`src/server/billing/service.ts`) creates a
+hosted checkout session at the provider for the invoice's *stored* total and saves it as a `payments` row; the
+customer pays on the provider's page; the provider sends a signed `checkout.session.completed` to
+`/api/stripe/webhook`; `processCheckoutEvent` marks the payment SUCCEEDED and the invoice PAID in one transaction.
+Tally never sees card details. In development and CI the provider is `MockProvider`, whose `/mock-checkout/<id>` page
+plays the customer and sends the same signed events (`e2e/billing.spec.ts` does the whole flow in Chrome).
+
+**Why not call Stripe inside the database transaction?**
+A slow or hung HTTP call would hold the invoice's row lock and a pooled connection for its whole duration, and if the
+transaction then rolled back, the session would exist at Stripe with no record here. So it's two transactions with the
+call in between, and the idempotency key covers the gap: a crash after the call and before the insert is retried with
+the same key and gets the same session back (`recovers the same session after a crash between the provider call and
+the insert` in `tests/integration/billing.test.ts`).
+
+**What's in the idempotency key, and why the digest?**
+`tally-checkout-<invoice>-<attempt>-<16 hex of sha256(request)>` (`checkoutIdempotencyKey`). Invoice and attempt
+make concurrent clicks and crash retries share one session; the attempt number moves on once an attempt has ended
+(failed or expired), so a new link is a new session. The digest was review round 1's suspicion: Stripe refuses a key
+reused with different parameters, permanently, so a retry after the organization was renamed would have been stuck
+for 24 hours; with the digest, a different request is simply a different key.
+
+**How do you verify a webhook?**
+`verifySignature` (`signature.ts`): HMAC-SHA256 of `t + "." + raw body` with the endpoint secret, compared in constant
+time with every `v1` in the header (more than one while a secret is being rolled), the signature checked before the
+timestamp, and the timestamp within 5 minutes either way. The raw *bytes* matter: re-serialized JSON wouldn't match
+(`refuses a body that differs only in whitespace or key order`). The scheme is checked against `openssl dgst -hmac`,
+so a mistake shared by my signer and my verifier can't hide.
+
+**How do you process each event exactly once?**
+The first statement of the event's transaction inserts its id into `stripe_events` with `ON CONFLICT (id) DO NOTHING
+RETURNING id`. Nothing returned means it was processed before: answer "duplicate", change nothing. If two deliveries
+arrive together, the second insert waits on the first's uncommitted key and then sees the conflict; if the first
+rolls back, the second goes ahead. The test sends one event 10 times at once and gets one "processed" and nine
+"duplicate" (`takes effect once however often it's delivered`); the benchmark repeats it for thousands of events.
+
+**Events can arrive out of order. What happens?**
+Payment statuses only move forward, in the trigger (`payments_guard`) and in the service: PENDING to PROCESSING to
+SUCCEEDED or FAILED, PENDING to EXPIRED, and SUCCEEDED is final. A settlement processed before the older "completed
+(unpaid)" leaves the payment SUCCEEDED and calls the older one "stale" (`can't be undone by events arriving out of
+order`). The one backwards-looking move allowed is FAILED or EXPIRED to SUCCEEDED: if money arrived, it's recorded.
+
+**What if money arrives for an invoice that doesn't want it?**
+It's recorded on the payment with `refund_due` set, and the invoice isn't touched: paid by hand already
+(`refund-due-paid`), voided (`refund-due-void`), or the amount or currency differs from the payment's
+(`amount-mismatch`). Refunding is a person's decision (and Stripe call) I haven't built; the flag and the "Refund due"
+badge make it visible.
+
+**How does the webhook know which tenant it's for, without a login?**
+From the session's metadata, which Tally wrote when it created the session and Stripe signed with the rest of the
+event. `runForStripeEvent` in `src/server/dal.ts` only accepts a `VerifiedCheckoutEvent`, a branded type that only the
+parser returns after the signature verified, so an unverified organization id can't reach `withTenant` by accident.
+Row security still applies inside: the payment is looked up by session id in that organization only, so an event that
+names the wrong organization finds nothing (`can't touch another organization's payment by naming it in the
+metadata`).
+
+**What did the reviews find today?**
+Round 1: an upper-case invoice id in the URL went into the session metadata as typed; the parser only accepted lower
+case, so a paid checkout's events were acknowledged as "not ours" and the money never recorded. And a unique violation
+from a raw query arrives as Prisma's P2010, not P2002, so the "checkout-busy" answer was dead code and a 500. Fixing
+the second exposed two races my own 8-click test then caught: an identical session hitting the partial unique index
+instead of the `ON CONFLICT` target, and the live check and the attempt count disagreeing under READ COMMITTED. Both
+are closed by taking the invoice lock first. Its suspicions led to four more fixes (emoji-safe descriptions, Stripe's
+409 for in-flight keys, the digest in the key, expiring a newer link when a late success pays the invoice).
+
+**What did you find yourself?**
+That Prisma 7.10's pg adapter drops time zones both ways, so on a non-UTC database every stored time was five hours
+off; CI runs in UTC and would never have shown it. Every connection now runs in UTC and the test database runs in New
+York time (`tests/integration/timezone.test.ts`). And a deadlock between two events for one payment: the inbox
+insert's foreign-key check holds `FOR KEY SHARE` on the payment, which my `FOR UPDATE` conflicted with.
+
 ## What I'd do next, or differently at scale
 
 - Rate-limit sign-in (day 4), and email verification to stop sign-up from revealing accounts.
+- Refunds and partial payments: new payment and invoice states (PAID can't change today), a refund action for
+  `refund_due` payments, and a reconciliation job that lists Stripe's events since the last one seen, for anything a
+  webhook outage longer than Stripe's three days of retries would lose.
+- Process webhooks from a queue: answer 200 as soon as the event is stored, apply it in a worker, as Stripe
+  recommends at volume. Today the transaction is short enough (measured in the README) to do inline.
 - Credit notes rather than editing a final invoice: a negative document that references the original, numbered in
   the same sequence; and an embedded font for PDFs in non-Latin scripts.
 - If one organization ever finalized hundreds of invoices a second, number them in a batch (one counter update for
