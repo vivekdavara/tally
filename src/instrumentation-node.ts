@@ -5,6 +5,7 @@
 // It is also bounded in time: Next.js holds every request until this module finishes, so a check that
 // hung would leave a process that neither serves nor exits. Connecting already gives up after 5 s
 // (createDb); the timer covers anything else that could stall.
+import { readBillingConfig } from "./server/billing/config";
 import { db } from "./server/db/client";
 import { assertSafeAppRole } from "./server/db/role-check";
 
@@ -12,6 +13,8 @@ const STARTUP_CHECK_MS = 15_000;
 
 let timer: NodeJS.Timeout | undefined;
 try {
+  // Billing settings too (a live Stripe key, a missing signing secret): refused here, not at the first payment.
+  readBillingConfig();
   await Promise.race([
     assertSafeAppRole(db()),
     new Promise<never>((_, reject) => {
