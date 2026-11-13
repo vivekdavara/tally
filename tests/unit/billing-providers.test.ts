@@ -270,6 +270,12 @@ describe("StripeProvider against a stand-in for api.stripe.com", () => {
       res.end("<html>bad gateway</html>");
     };
     expect(await refusal(stripe().createCheckoutSession(request()))).toMatchObject({ code: "bad_response", retryable: true });
+    // A rate limiter in front of Stripe answering in plain text is still a rate limit (review round 3).
+    respond = (_req, res) => {
+      res.writeHead(429, { "Content-Type": "text/plain" });
+      res.end("Too Many Requests");
+    };
+    expect(await refusal(stripe().createCheckoutSession(request()))).toMatchObject({ code: "bad_response", retryable: true, httpStatus: 429 });
     respond = (_req, res) => json(res, 200, { id: "cs_test_a", url: "http://insecure.example/pay", expires_at: 1 });
     expect(await refusal(stripe().createCheckoutSession(request()))).toMatchObject({ code: "bad_response", retryable: false });
   });

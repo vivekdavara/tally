@@ -358,7 +358,11 @@ describe("webhook events", () => {
   });
 
   it("leaves an outcome on every processed event", async () => {
-    const nulls = await admin.$queryRaw<{ n: bigint }[]>`SELECT count(*) AS n FROM stripe_events WHERE outcome IS NULL`;
+    // This file's organizations only (slug pay-...): billing-schema.test.ts inserts raw event rows without outcomes on
+    // purpose, and Vitest may run it first (it orders files by their cached durations).
+    const nulls = await admin.$queryRaw<{ n: bigint }[]>`
+      SELECT count(*) AS n FROM stripe_events e JOIN organizations o ON o.id = e.organization_id
+      WHERE e.outcome IS NULL AND o.slug LIKE 'pay-%'`;
     expect(nulls[0]!.n).toBe(0n);
   });
 });

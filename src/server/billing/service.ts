@@ -182,12 +182,17 @@ export async function startCheckout(run: TenantRun, givenId: string, deps: Check
   }
 }
 
+/** Provider answers to an expiry that mean the session can't be paid any more anyway (it isn't open, or doesn't exist). */
+const SESSION_ALREADY_CLOSED = new Set(["session_not_open", "resource_missing"]);
+
 /**
  * Ends an invoice's pending sessions at the provider, so the customer can't pay them (after it was paid by hand,
  * voided, or paid by another attempt). The provider then sends checkout.session.expired, which marks each payment
  * EXPIRED. PROCESSING payments can't be expired (the customer already submitted a bank debit). Returns how many were
- * expired and the failures worth retrying (network, 429, 5xx); a refusal that won't change on retry (the session is
- * already expired or paid) is only logged. A session that is paid anyway is still recorded, with refund_due set.
+ * expired and the sessions whose expiry failed and is worth retrying: every failure except an answer that the session
+ * is already closed (review round 3: a plain-text 429 was taken for a permanent refusal). A refusal Tally can't
+ * classify, such as Stripe declining to expire a session that has just completed, is retried too; that settles
+ * itself once the session's own event moves its payment out of PENDING.
  */
 export async function expirePendingCheckouts(
   run: TenantRun,
@@ -204,24 +209,26 @@ export async function expirePendingCheckouts(
       expired += 1;
     } catch (error) {
       console.error(`billing: expiring ${checkoutSessionId} failed: ${(error as Error).message}`);
-      if (error instanceof ProviderError && error.retryable) retryable.push(checkoutSessionId);
+      if (!(error instanceof ProviderError && SESSION_ALREADY_CLOSED.has(error.code))) retryable.push(checkoutSessionId);
     }
   }
   return { expired, retryable };
 }
 
 /**
- * WebhookDeps.afterApplied for the app: once an event has paid an invoice, end its other pending payment links. A
- * late success on an attempt given up on (FAILED, EXPIRED) can pay the invoice while a newer link is still live, and
- * the customer could pay that one too (review round 1's suspicion). It must not be best effort (review round 2): it
- * throws when an expiry failed in a way a retry could fix, so the webhook answers 500 and Stripe redelivers; the
- * redelivery is a duplicate, which runs this again with the stored outcome. The same happens if the process died
- * after the event's commit and before this finished.
+ * WebhookDeps.afterApplied for the app: after any event, if the invoice is no longer OPEN, end its pending payment
+ * links. No legitimate pending link can exist on a closed invoice (payments_guard only creates them for OPEN ones),
+ * and one left behind lets the customer pay twice: a late success on an abandoned attempt pays the invoice while a
+ * newer link is live (round 1's suspicion), or the expiry after paying by hand failed and the next event is
+ * "refund-due-paid" (round 3). Not best effort (round 2): it throws when an expiry should be retried, so the webhook
+ * answers 500 and Stripe redelivers; a redelivery is a duplicate, which runs this again. The name is kept from round 1.
  */
 export function expireOthersWhenPaid<E extends CheckoutEvent>(provider: BillingProvider, runFor: (event: E) => TenantRun) {
-  return async (event: E, outcome: string): Promise<void> => {
-    if (outcome !== "invoice-paid") return;
-    const { retryable } = await expirePendingCheckouts(runFor(event), event.invoiceId, provider);
+  return async (event: E): Promise<void> => {
+    const run = runFor(event);
+    const invoice = await run((tx) => tx.invoice.findUnique({ where: { id: event.invoiceId }, select: { status: true } }));
+    if (!invoice || invoice.status === "OPEN" || invoice.status === "DRAFT") return;
+    const { retryable } = await expirePendingCheckouts(run, event.invoiceId, provider);
     if (retryable.length > 0) throw new Error(`couldn't expire ${retryable.join(", ")} yet`);
   };
 }

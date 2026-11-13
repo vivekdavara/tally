@@ -102,17 +102,19 @@ export class StripeProvider implements BillingProvider {
       // same idempotency key is safe, and that is what the caller's next attempt does.
       throw new ProviderError(`Stripe request failed: ${(error as Error).name}`, "network", true);
     }
+    // 409: an idempotent request still in flight, or a lock timeout; 429: rate limited; 5xx: Stripe's side. Whatever
+    // the body: a rate limiter or proxy in front of Stripe answers 429 in plain text, and that is still worth
+    // retrying (review round 3: classed as permanent, it let the webhook acknowledge a link it hadn't expired).
+    const retryable = response.status === 409 || response.status === 429 || response.status >= 500;
     let json: Record<string, unknown>;
     try {
       json = (await response.json()) as Record<string, unknown>;
     } catch {
-      throw new ProviderError(`Stripe answered ${response.status} without JSON`, "bad_response", response.status >= 500);
+      throw new ProviderError(`Stripe answered ${response.status} without JSON`, "bad_response", retryable, response.status);
     }
     if (!response.ok) {
       const error = (json.error ?? {}) as { code?: unknown; type?: unknown; message?: unknown };
       const code = typeof error.code === "string" ? error.code : typeof error.type === "string" ? error.type : `http_${response.status}`;
-      // 409: an idempotent request still in flight; 429: rate limited; 5xx: Stripe's side.
-      const retryable = response.status === 409 || response.status === 429 || response.status >= 500;
       // Stripe's message only: it never contains the key, and the key is never logged here.
       throw new ProviderError(typeof error.message === "string" ? error.message : `Stripe answered ${response.status}`, code, retryable, response.status);
     }
