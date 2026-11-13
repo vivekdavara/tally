@@ -148,7 +148,7 @@ and everything else runs.
 Apple M3 laptop (macOS 26.6.2, Node 23.11, Postgres 14.20), no review agent running during the benchmarks, load
 average 3.4 to 4.7 (other processes). The no-hook runs were on battery, the later ones on AC. Synthetic data.
 
-- **Tests:** 534 Vitest tests in 64 files (`npm run check`, files one at a time), 142 of them new today; 22
+- **Tests:** 534 Vitest tests in 64 files (`npm run check`, 32.7 s, files one at a time), 142 of them new today; 22
   Playwright tests (`npm run e2e`, 15.1 s), 6 new. Among the new: the signature scheme checked against `openssl dgst
   -hmac`; the Stripe client's every request checked by a local stand-in for api.stripe.com (form encoding, bearer key,
   idempotency key, error mapping, timeout, the 409 wait); the payment guards through raw SQL as the app and as a
@@ -276,9 +276,9 @@ All measured on an Apple M3 laptop (macOS 26.6.2, Node 23.11, Postgres 14.20), o
 ### Day 3
 
 Four review agents, one after another, each in its own worktree and database, findings as failing tests; every
-finding reproduced here before fixing.
+finding reproduced here before fixing (durations are the agents' own run times).
 
-- **Round 1** (at `b47a6ba`, 11 minutes, `tests/review-d3/`): **an upper-case invoice id lost the payment.** The URL
+- **Round 1** (at `b47a6ba`, 6.4 minutes, `tests/review-d3/`): **an upper-case invoice id lost the payment.** The URL
   accepts either case and Postgres reads both, but the id went into the checkout session's metadata as typed and the
   webhook parser only accepted lower case: every event for that session was acknowledged as "not a Tally session",
   so a paid checkout was never recorded. Fixed at both ends (`startCheckout` lower-cases; the parser accepts either
@@ -292,18 +292,18 @@ finding reproduced here before fixing.
   `encodeURIComponent` throw); Stripe's 409 for an in-flight idempotency key waited out instead of shown as an error;
   a digest of the request in the idempotency key (a retry after a rename was otherwise refused by Stripe for 24
   hours); and a late success that pays the invoice now expires its newer pending link.
-- **Round 2** (at `868b60c`, 5 minutes, `tests/review-d3r2/`): both findings in round 1's last fix. **Expiring the
+- **Round 2** (at `868b60c`, 5.1 minutes, `tests/review-d3r2/`): both findings in round 1's last fix. **Expiring the
   newer link was best effort:** it ran only on the delivery that applied the event (a crash after the commit, and
   Stripe's redelivery answered "duplicate" without it) and swallowed transient provider errors behind a 200. Now a
   duplicate carries the stored outcome and re-runs the after-effects, and a retryable failure answers 500 so Stripe
   redelivers. Both halves checked as mutations (each fails a reviewer test).
-- **Round 3** (at `99c5f56`, 4 minutes, `tests/review-d3r3/`): both findings in round 2's fix. **A 429 without a JSON
+- **Round 3** (at `99c5f56`, 4.0 minutes, `tests/review-d3r3/`): both findings in round 2's fix. **A 429 without a JSON
   body** (a rate limiter or proxy in front of Stripe) was classed as permanent, so the newer link stayed payable
   behind a 200; the Stripe client now marks 409/429/5xx retryable whatever the body, and expiring a link retries
   every failure except "the session is already closed". **A failed expiry after marking paid by hand** was never
   retried, because the next paying event's outcome was "refund-due-paid", not "invoice-paid"; the hook now acts after
   any event whenever the invoice is no longer open. Both checked as mutations.
-- **Round 4** (at `cd0642e`, 4 minutes, `tests/review-d3r4/`): one finding, in round 3's fix. Retrying every expiry
+- **Round 4** (at `cd0642e`, 3.5 minutes, `tests/review-d3r4/`): one finding, in round 3's fix. Retrying every expiry
   failure except "already closed" meant **a permanent refusal kept every event for the invoice at 500** until Stripe
   gave up (and might disable the endpoint). Now only what the provider marks retryable is retried; refusals are logged.
   Checked by mutation (undoing the client's plain-text 429 fix fails round 3's test again). As on Canary, Orderly and
