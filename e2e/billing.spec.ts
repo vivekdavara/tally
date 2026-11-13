@@ -67,6 +67,29 @@ test("an open invoice is paid through its payment link, exactly once", async ({ 
   await expect(page.getByTestId("collect-payment")).toHaveCount(0);
 });
 
+test("a bank debit shows as processing until it settles, then pays the invoice", async ({ page }) => {
+  const invoicePath = await openInvoice(page);
+  await page.getByTestId("collect-payment").getByRole("button", { name: "Create payment link" }).click();
+  await page.getByTestId("checkout-link").click();
+  await page.getByTestId("pay-bank").getByRole("button", { name: "Pay by bank debit" }).click();
+  await expect(page.getByTestId("deliveries")).toContainText('"outcome":"payment-processing"');
+  const checkout = page.url();
+
+  await page.goto(invoicePath);
+  await expect(page.getByTestId("invoice-title")).toContainText("Open");
+  await expect(page.getByTestId("payments").locator("tbody tr")).toHaveAttribute("data-status", "PROCESSING");
+  // A live (processing) attempt is reused: no second link while the debit is in flight.
+  await page.getByTestId("collect-payment").getByRole("button", { name: "Create payment link" }).click();
+  await expect(page.getByTestId("payments").locator("tbody tr")).toHaveCount(1);
+
+  await page.goto(checkout);
+  await page.getByTestId("settle-ok").getByRole("button", { name: "Bank debit settles" }).click();
+  await expect(page.getByTestId("deliveries")).toContainText('"outcome":"invoice-paid"');
+  await page.goto(invoicePath);
+  await expect(page.getByTestId("invoice-title")).toContainText("Paid");
+  await expect(page.getByTestId("payments").locator("tbody tr")).toHaveAttribute("data-status", "SUCCEEDED");
+});
+
 test("voiding an invoice expires its payment link", async ({ page }) => {
   const invoicePath = await openInvoice(page);
   await page.getByTestId("collect-payment").getByRole("button", { name: "Create payment link" }).click();
