@@ -438,9 +438,12 @@ finding as a failing test (`tests/review/`).
 
 ## Limitations (day 3)
 
-- **Stripe itself is untested here.** The Stripe client is tested against a local stand-in that checks every request
-  it sends, and the mock answers like Stripe where Tally depends on it, but nothing in this repository has talked to
-  api.stripe.com: there is no key. `scripts/stripe-smoke.ts` is the check to run with a test key.
+- **Stripe itself is only partly checked.** On 2026-11-13 Vivek ran `scripts/stripe-smoke.ts` with his test key
+  against Stripe's real test mode: Stripe accepted the client's checkout-session request as encoded (a session with a
+  `checkout.stripe.com` URL and an expiry 24 hours out), returned the same session for the repeated idempotency key,
+  and expired it. Not yet checked against Stripe itself: real webhook deliveries (a real endpoint secret, e.g. through
+  `stripe listen`), a completed payment, and the paged event listing reconciliation uses; those are tested against the
+  local stand-in for api.stripe.com and the mock. The tests and CI never use a key.
 - No refunds or partial payments: PAID is final, and money that arrives for an invoice that doesn't want it is only
   flagged (`refund_due`, a "Refund due" badge); refunding it is done by hand in Stripe's dashboard.
 - Reconciliation (`npm run reconcile -- <hours>`) is a script to run by hand or from cron; nothing schedules it yet
