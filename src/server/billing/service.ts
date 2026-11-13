@@ -189,10 +189,7 @@ const SESSION_ALREADY_CLOSED = new Set(["session_not_open", "resource_missing"])
  * Ends an invoice's pending sessions at the provider, so the customer can't pay them (after it was paid by hand,
  * voided, or paid by another attempt). The provider then sends checkout.session.expired, which marks each payment
  * EXPIRED. PROCESSING payments can't be expired (the customer already submitted a bank debit). Returns how many were
- * expired and the sessions whose expiry failed and is worth retrying: every failure except an answer that the session
- * is already closed (review round 3: a plain-text 429 was taken for a permanent refusal). A refusal Tally can't
- * classify, such as Stripe declining to expire a session that has just completed, is retried too; that settles
- * itself once the session's own event moves its payment out of PENDING.
+ * expired and the sessions whose expiry failed in a way worth retrying (see expireSessions).
  */
 export async function expirePendingCheckouts(
   run: TenantRun,
@@ -218,7 +215,12 @@ async function expireSessions(provider: BillingProvider, sessionIds: string[]): 
       expired += 1;
     } catch (error) {
       console.error(`billing: expiring ${id} failed: ${(error as Error).message}`);
-      if (!(error instanceof ProviderError && SESSION_ALREADY_CLOSED.has(error.code))) retryable.push(id);
+      // Retried: what the provider says may succeed later (network, 409, 429, 5xx, with or without a JSON body), and
+      // anything that isn't a provider answer at all. Not retried: a refusal (a 4xx with an error code), which would
+      // keep every event for this invoice at 500 until Stripe gave up (review round 4, on round 3's "retry
+      // everything but already-closed"). Such a refusal is logged above; a link paid anyway is recorded with
+      // refund_due.
+      if (!(error instanceof ProviderError) || (error.retryable && !SESSION_ALREADY_CLOSED.has(error.code))) retryable.push(id);
     }
   }
   return { expired, retryable };
