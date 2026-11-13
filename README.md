@@ -144,38 +144,44 @@ and everything else runs.
 
 ## Results (day 3)
 
-Apple M3 laptop (macOS 26.6.2, Node 23.11, Postgres 14.20), on battery, load average 3.4 to 4.1 with no review agent
-running during the benchmark. Synthetic data.
+Apple M3 laptop (macOS 26.6.2, Node 23.11, Postgres 14.20), no review agent running during the benchmarks, load
+average 3.4 to 4.7 (other processes). The handler-only runs were on battery, the final ones on AC. Synthetic data.
 
-- **Tests:** 507 Vitest tests in 60 files (`npm run check`, 31.4 s, files one at a time), 115 of them new today; 21
-  Playwright tests (`npm run e2e`, 13.9 s), 5 new. Among the new: the signature scheme checked against `openssl dgst
+- **Tests:** 527 Vitest tests in 62 files (`npm run check`, 32.5 s, files one at a time), 135 of them new today; 22
+  Playwright tests (`npm run e2e`, 14.9 s), 6 new. Among the new: the signature scheme checked against `openssl dgst
   -hmac`; the Stripe client's every request checked by a local stand-in for api.stripe.com (form encoding, bearer key,
   idempotency key, error mapping, timeout, the 409 wait); the payment guards through raw SQL as the app and as a
-  superuser; **8 concurrent clicks give one session and one row** (37 runs without a failure after the fix); a crash
-  between the provider call and the insert recovers the same session; **one event delivered 10 times at once: one
-  "processed", nine "duplicate"**; events out of order, late, for the wrong amount, for a paid or void invoice, and
-  naming another organization; time zones through Prisma on a New York database; the review rounds' findings
-  (`tests/review-d3/`, `tests/review-d3r2/`); e2e of a payment through the mock checkout page (a resent event answers
-  "duplicate"), voiding expiring the link, and the webhook route over HTTP (unsigned, forged, stale, oversized).
-- **What the webhook path costs** (`npm run bench:webhook`, the final code, run twice; 2,000 events per case after 200
-  warm-up, 16 organizations, workers sharing a pool of as many connections; each event is a signed
-  `checkout.session.completed` paying a different open invoice; the script checks every answer and that every invoice
-  ended paid once with one event row):
+  superuser; the role check noticing each new forbidden grant and a disabled guard; **8 concurrent clicks give one
+  session and one row** (37 runs without a failure after the fix); a crash between the provider call and the insert
+  recovers the same session; **one event delivered 10 times at once: one "processed", nine "duplicate"**; events out
+  of order, late, for the wrong amount, for a paid or void invoice, and naming another organization; time zones
+  through Prisma on a New York database; the three review rounds' findings (`tests/review-d3/`, `tests/review-d3r2/`,
+  `tests/review-d3r3/`); e2e of a card payment and a bank debit through the mock checkout page (a resent event
+  answers "duplicate"), voiding expiring the link, and the webhook route over HTTP (unsigned, forged, stale,
+  oversized).
+- **What the webhook path costs** (`npm run bench:webhook` on the final code, run twice; 2,000 events per case after
+  200 warm-up, 16 organizations, workers sharing a pool of as many connections; each event is a signed
+  `checkout.session.completed` paying a different open invoice, through the handler with the app's after-effects hook;
+  the script checks every answer and that every invoice ended paid once with one event row):
 
   | Case | Workers | Events/s (run 1 / run 2) | p50 ms | p95 ms | p99 ms |
   |---|---|---|---|---|---|
-  | fresh event | 1 | 678 / 663 | 1.42 / 1.45 | 1.80 / 1.84 | 2.18 / 2.19 |
-  | redelivered | 1 | 1,659 / 1,635 | 0.59 / 0.60 | 0.64 / 0.66 | 1.11 / 1.11 |
-  | fresh event | 8 | 1,684 / 1,701 | 4.62 / 4.67 | 6.08 / 5.88 | 7.59 / 6.41 |
-  | redelivered | 8 | 3,401 / 3,232 | 2.35 / 2.46 | 3.39 / 3.63 | 3.84 / 4.10 |
-  | fresh event | 32 | 1,681 / 1,634 | 17.42 / 17.88 | 28.38 / 28.96 | 31.24 / 32.07 |
-  | redelivered | 32 | 3,254 / 3,176 | 9.41 / 9.69 | 14.64 / 15.26 | 17.26 / 17.22 |
+  | fresh event | 1 | 512 / 501 | 1.89 / 1.92 | 2.36 / 2.40 | 2.69 / 2.79 |
+  | redelivered | 1 | 951 / 940 | 1.03 / 1.04 | 1.17 / 1.18 | 1.54 / 1.58 |
+  | fresh event | 8 | 1,248 / 1,224 | 6.37 / 6.53 | 7.76 / 7.86 | 8.57 / 8.62 |
+  | redelivered | 8 | 1,910 / 1,862 | 4.09 / 4.22 | 5.86 / 5.99 | 6.45 / 6.61 |
+  | fresh event | 32 | 1,183 / 1,116 | 25.32 / 25.78 | 37.78 / 39.21 | 41.69 / 102.45 |
+  | redelivered | 32 | 1,834 / 1,820 | 16.57 / 16.68 | 24.98 / 25.47 | 29.09 / 29.65 |
 
   A fresh event is one transaction of about eight statements (tenant setting, payment lookup, inbox insert, two
-  locks, two updates, the outcome) at about 1.4 ms alone; throughput stops growing between 8 and 32 workers (about
-  1,700/s), so past 8 the extra workers only queue (p50 4.6 to 17.4 ms). A redelivery stops after the inbox insert
-  and an outcome read, so it costs about 40% of a fresh event. Stripe delivers far below these rates; the numbers say
-  inline processing is affordable, not that it's the design for bursts (a queue would be).
+  locks, two updates, the outcome) plus the hook's one read transaction, about 1.9 ms alone; throughput stops growing
+  by 8 workers (about 1,240/s), and past that the extra workers only queue (p50 6.4 to 25 ms). A redelivery stops
+  after the inbox insert and an outcome read, then runs the hook again (round 2 made that necessary), about 55% of a
+  fresh event. One p99 of 102 ms at 32 workers in run 2 (the other run: 42 ms) is unexplained.
+- **What the after-effects hook costs:** the same benchmark before the hook was passed in (two runs on battery, at
+  `99c5f56` plus the handler as it was then): fresh 1.42 / 1.45 ms alone and 1,684 / 1,701 events/s at 8 workers;
+  redelivered 0.59 / 0.60 ms. So the hook's extra transaction costs about 0.5 ms per event and a quarter of the peak
+  throughput. Folding its read into the event's own transaction would win that back; not done today.
 - **The signature check alone:** a median of 2.0 to 2.1 µs for a 484-byte event (21,000 checks, the first 1,000
   dropped; printed by the same script).
 - **Startup refuses a misconfigured billing setup:** `BILLING_PROVIDER=stripe` with a live-mode key and no signing
@@ -288,6 +294,13 @@ finding reproduced here before fixing.
   Stripe's redelivery answered "duplicate" without it) and swallowed transient provider errors behind a 200. Now a
   duplicate carries the stored outcome and re-runs the after-effects, and a retryable failure answers 500 so Stripe
   redelivers. Both halves checked as mutations (each fails a reviewer test).
+- **Round 3** (at `99c5f56`, 4 minutes, `tests/review-d3r3/`): both findings in round 2's fix. **A 429 without a JSON
+  body** (a rate limiter or proxy in front of Stripe) was classed as permanent, so the newer link stayed payable
+  behind a 200; the Stripe client now marks 409/429/5xx retryable whatever the body, and expiring a link retries
+  every failure except "the session is already closed". **A failed expiry after marking paid by hand** was never
+  retried, because the next paying event's outcome was "refund-due-paid", not "invoice-paid"; the hook now acts after
+  any event whenever the invoice is no longer open. Both checked as mutations. As on Canary, Orderly and Pathfinder,
+  each round found bugs in the previous round's fixes, so a fourth would likely find more; stopped for time.
 
 ### Day 2
 
@@ -413,8 +426,12 @@ finding as a failing test (`tests/review/`).
   api.stripe.com: there is no key. `scripts/stripe-smoke.ts` is the check to run with a test key.
 - No refunds or partial payments: PAID is final, and money that arrives for an invoice that doesn't want it is only
   flagged (`refund_due`, a "Refund due" badge); refunding it is done by hand in Stripe's dashboard.
-- No reconciliation job: if the webhook endpoint were down longer than Stripe's three days of retries, events would
-  be lost; listing Stripe's events since the last one seen would recover them.
+- No reconciliation job: if the webhook endpoint were down longer than Stripe's three days of retries (fewer, over a few
+  hours, in test mode), events would be lost; listing Stripe's events since the last one seen would recover them. The
+  same job would be the backstop for after-effects that keep failing: today their only retry is Stripe's redelivery.
+- Expiring a closed invoice's links right after marking it paid or voiding it is best effort; a failure there is
+  retried only when the next event for that invoice arrives (round 3), and a link paid in between is recorded with
+  `refund_due`.
 - Events are applied inline, in the request (milliseconds; "Results (day 3)" has the numbers), not from a queue.
 - A session whose row was never stored (a crash after creating it, then no retry) gets 404s, and so Stripe retries,
   for three days; it was never shown to anyone, so nobody can pay it.

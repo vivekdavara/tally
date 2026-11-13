@@ -387,7 +387,12 @@ from a raw query arrives as Prisma's P2010, not P2002, so the "checkout-busy" an
 the second exposed two races my own 8-click test then caught: an identical session hitting the partial unique index
 instead of the `ON CONFLICT` target, and the live check and the attempt count disagreeing under READ COMMITTED. Both
 are closed by taking the invoice lock first. Its suspicions led to four more fixes (emoji-safe descriptions, Stripe's
-409 for in-flight keys, the digest in the key, expiring a newer link when a late success pays the invoice).
+409 for in-flight keys, the digest in the key, expiring a newer link when a late success pays the invoice). Rounds 2
+and 3 each found two bugs in the previous round's fix, all about that last one: it ran only on the first delivery and
+swallowed transient errors (now duplicates re-run it and a retryable failure answers 500), it took a plain-text 429
+for a permanent refusal, and it ignored a "refund-due-paid" event that followed a failed expiry after marking paid by
+hand (now it acts whenever the invoice is closed). The lesson I took: a side effect after a commit needs a retry path,
+and "best effort" is a decision to write down, not a default.
 
 **What did you find yourself?**
 That Prisma 7.10's pg adapter drops time zones both ways, so on a non-UTC database every stored time was five hours
