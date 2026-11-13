@@ -1,5 +1,6 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
+import { listPayments } from "@/server/billing/service";
 import { requireTenant } from "@/server/dal";
 import { formatDate, invoiceLabel, STATUS_LABELS } from "@/server/invoices/format";
 import { formatMoney, formatQuantity, formatTaxRate, toMajorString } from "@/server/invoices/money";
@@ -7,6 +8,7 @@ import { getInvoice, listCustomers } from "@/server/invoices/service";
 import { ActionForm } from "../../../../components/action-form";
 import {
   addLineAction,
+  collectPaymentAction,
   deleteDraftAction,
   finalizeAction,
   markPaidAction,
@@ -15,10 +17,22 @@ import {
   voidAction,
 } from "../../actions";
 
+const PAYMENT_LABELS = {
+  PENDING: "Waiting for payment",
+  PROCESSING: "Processing (bank debit)",
+  SUCCEEDED: "Paid",
+  FAILED: "Failed",
+  EXPIRED: "Expired",
+} as const;
+
 export default async function InvoicePage({ params }: { params: Promise<{ slug: string; id: string }> }) {
   const { slug, id } = await params;
   const { organization, run } = await requireTenant(slug);
-  const { invoice, customers } = await run(async (tx) => ({ invoice: await getInvoice(tx, id), customers: await listCustomers(tx) }));
+  const { invoice, customers, payments } = await run(async (tx) => ({
+    invoice: await getInvoice(tx, id),
+    customers: await listCustomers(tx),
+    payments: await listPayments(tx, id),
+  }));
   if (!invoice) notFound();
   const money = (minor: bigint) => formatMoney(minor, invoice.currency);
   const draft = invoice.status === "DRAFT";
@@ -139,10 +153,63 @@ export default async function InvoicePage({ params }: { params: Promise<{ slug: 
           <ActionForm action={deleteDraftAction.bind(null, slug, invoice.id)} testId="delete-draft" submit="Delete draft" pending="Deleting…" danger />
         </>
       ) : invoice.status === "OPEN" ? (
-        <div className="row">
-          <ActionForm action={markPaidAction.bind(null, slug, invoice.id)} testId="mark-paid" submit="Mark paid" pending="Saving…" />
-          <ActionForm action={voidAction.bind(null, slug, invoice.id)} testId="void" submit="Void invoice" pending="Voiding…" danger />
-        </div>
+        <>
+          <h2>Payment</h2>
+          <p className="muted">
+            A payment link opens a hosted checkout page for {money(invoice.totals.total)}; send it to the customer. The invoice is
+            marked paid when the payment provider confirms the payment.
+          </p>
+          <div className="row">
+            <ActionForm action={collectPaymentAction.bind(null, slug, invoice.id)} testId="collect-payment" submit="Create payment link" pending="Creating…" />
+            <ActionForm action={markPaidAction.bind(null, slug, invoice.id)} testId="mark-paid" submit="Mark paid" pending="Saving…" />
+            <ActionForm action={voidAction.bind(null, slug, invoice.id)} testId="void" submit="Void invoice" pending="Voiding…" danger />
+          </div>
+        </>
+      ) : null}
+
+      {payments.length > 0 ? (
+        <>
+          <h2>Payment attempts</h2>
+          <table data-testid="payments">
+            <thead>
+              <tr>
+                <th>Created</th>
+                <th>Status</th>
+                <th className="num">Amount</th>
+                <th>Link</th>
+              </tr>
+            </thead>
+            <tbody>
+              {payments.map((p) => (
+                <tr key={p.id} data-status={p.status}>
+                  <td>{formatDate(p.createdAt)}</td>
+                  <td>
+                    {PAYMENT_LABELS[p.status]}
+                    {p.paidAt ? ` ${formatDate(p.paidAt)}` : ""}
+                    {p.refundDue ? (
+                      <>
+                        {" "}
+                        <span className="badge" data-testid="refund-due">
+                          Refund due
+                        </span>
+                      </>
+                    ) : null}
+                  </td>
+                  <td className="num">{money(p.amountMinor)}</td>
+                  <td>
+                    {p.status === "PENDING" ? (
+                      <a href={p.checkoutUrl} data-testid="checkout-link" rel="noreferrer">
+                        Payment link
+                      </a>
+                    ) : (
+                      "—"
+                    )}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </>
       ) : null}
     </section>
   );

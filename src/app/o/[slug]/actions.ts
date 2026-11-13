@@ -3,6 +3,8 @@
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 import { z } from "zod";
+import { billing } from "@/server/billing/runtime";
+import { expirePendingCheckouts, startCheckout } from "@/server/billing/service";
 import { requireTenant } from "@/server/dal";
 import { customerInput, draftInput, draftUpdateInput, finalizeInput, parseLine } from "@/server/invoices/schemas";
 import {
@@ -41,6 +43,13 @@ const MESSAGES: Record<string, string> = {
   "no-lines": "Add at least one line before finalizing.",
   "too-many-lines": "An invoice can have at most 100 lines.",
   "bad-terms": "Use payment terms of 0 to 365 days.",
+  "amount-too-small": "This invoice is below the smallest amount the payment provider can charge in its currency.",
+  "amount-too-large": "This invoice is above the largest amount the payment provider can charge in one payment.",
+  "currency-not-chargeable": "Card payment isn't available for this currency.",
+  "checkout-expiring": "The last payment link expired a moment ago. Try again in a few minutes.",
+  "checkout-busy": "Another payment link was just created for this invoice. Reload the page.",
+  "provider-unavailable": "The payment provider didn't answer. Try again.",
+  "provider-error": "The payment provider refused the request.",
 };
 
 const message = (result: { ok: false; reason: string }): FormState => ({ error: MESSAGES[result.reason] ?? "Something went wrong." });
@@ -137,12 +146,35 @@ export async function finalizeAction(slug: string, id: string, _state: FormState
   return invoiceAction(slug, id, (tx) => finalize(tx, id, parsed.data.netDays));
 }
 
+/**
+ * Paid by hand or voided: its pending payment links are expired at the provider afterwards, so the customer can't
+ * pay them (a payment that gets through anyway is recorded with refund_due set).
+ */
+async function closeInvoice(slug: string, id: string, fn: (tx: TenantTx) => Promise<Result<unknown>>): Promise<FormState> {
+  const { run } = await requireTenant(slug);
+  const result = await refusals(() => run(fn));
+  if (!result.ok) return message(result);
+  await expirePendingCheckouts(run, id, billing().provider);
+  revalidatePath(invoicePath(slug, id));
+  return {};
+}
+
 export async function markPaidAction(slug: string, id: string): Promise<FormState> {
-  return invoiceAction(slug, id, (tx) => markPaid(tx, id));
+  return closeInvoice(slug, id, (tx) => markPaid(tx, id));
 }
 
 export async function voidAction(slug: string, id: string): Promise<FormState> {
-  return invoiceAction(slug, id, (tx) => voidInvoice(tx, id));
+  return closeInvoice(slug, id, (tx) => voidInvoice(tx, id));
+}
+
+/** A payment link for an open invoice: the live one, or a new checkout session for its total. */
+export async function collectPaymentAction(slug: string, id: string): Promise<FormState> {
+  const { run, organization } = await requireTenant(slug);
+  const { provider, config } = billing();
+  const result = await startCheckout(run, id, { provider, appBaseUrl: config.appBaseUrl, organizationName: organization.name });
+  if (!result.ok) return message(result);
+  revalidatePath(invoicePath(slug, id));
+  return {};
 }
 
 export async function deleteDraftAction(slug: string, id: string): Promise<FormState> {

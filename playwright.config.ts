@@ -8,6 +8,9 @@ import { defineConfig } from "@playwright/test";
 process.env.E2E_DATABASE_URL ??= "postgresql://tally_app@localhost:5432/tally_e2e";
 process.env.E2E_MIGRATE_DATABASE_URL ??= "postgresql://tally_owner@localhost:5432/tally_e2e";
 process.env.E2E_AUTH_SECRET ??= randomBytes(32).toString("base64");
+// The webhook signing secret the server verifies with (billing runs on the mock provider): known to the tests so
+// they can sign events and post them to /api/stripe/webhook over HTTP.
+process.env.E2E_STRIPE_WEBHOOK_SECRET ??= `whsec_e2e_${randomBytes(24).toString("hex")}`;
 
 export default defineConfig({
   testDir: "e2e",
@@ -28,6 +31,8 @@ export default defineConfig({
       AUTH_SECRET: process.env.E2E_AUTH_SECRET,
       // next start is production mode, where Auth.js wants the host it may trust stated.
       AUTH_TRUST_HOST: "true",
+      BILLING_PROVIDER: "mock",
+      STRIPE_WEBHOOK_SECRET: process.env.E2E_STRIPE_WEBHOOK_SECRET,
     },
     stdout: "pipe",
     reuseExistingServer: false,

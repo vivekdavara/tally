@@ -22,6 +22,8 @@ export interface MockSession {
   status: "open" | "complete" | "expired";
   paymentStatus: "unpaid" | "paid";
   paymentIntent: string | null;
+  /** Every event sent about this session and what the webhook answered (shown on the mock checkout page). */
+  deliveries: { eventId: string; type: string; body: Buffer; answer: unknown }[];
 }
 
 /** An event as Stripe would POST it: the raw body and its Stripe-Signature header. */
@@ -74,6 +76,7 @@ export class MockProvider implements BillingProvider {
       status: "open",
       paymentStatus: "unpaid",
       paymentIntent: null,
+      deliveries: [],
     };
     this.sessions.set(id, session);
     this.keys.set(request.idempotencyKey, { fingerprint, sessionId: id });
@@ -118,6 +121,20 @@ export class MockProvider implements BillingProvider {
     const session = this.open(id);
     session.status = "expired";
     return this.emit("checkout.session.expired", session);
+  }
+
+  /**
+   * Sends the session's last event again, re-signed with a fresh timestamp but the same id and body, as Stripe's
+   * retries do: the webhook must answer "duplicate" and change nothing.
+   */
+  async redeliver(id: string): Promise<SignedDelivery> {
+    const session = this.sessions.get(id);
+    const last = session?.deliveries.at(-1);
+    if (!session || !last) throw new ProviderError("nothing to redeliver", "resource_missing", false);
+    const delivery = { eventId: last.eventId, type: last.type, body: last.body, header: signatureHeader(this.options.webhookSecret, this.now(), last.body) };
+    const answer = await this.options.deliver?.(delivery);
+    session.deliveries.push({ eventId: last.eventId, type: last.type, body: last.body, answer });
+    return delivery;
   }
 
   /** The event Stripe would send about `session` now, signed. Doesn't deliver it. */
@@ -167,7 +184,8 @@ export class MockProvider implements BillingProvider {
 
   private async emit(type: string, session: MockSession): Promise<SignedDelivery> {
     const delivery = this.event(type, session);
-    await this.options.deliver?.(delivery);
+    const answer = await this.options.deliver?.(delivery);
+    session.deliveries.push({ eventId: delivery.eventId, type, body: delivery.body, answer });
     return delivery;
   }
 
