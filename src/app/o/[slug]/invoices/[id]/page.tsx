@@ -27,7 +27,7 @@ const PAYMENT_LABELS = {
 
 export default async function InvoicePage({ params }: { params: Promise<{ slug: string; id: string }> }) {
   const { slug, id } = await params;
-  const { organization, run } = await requireTenant(slug);
+  const { organization, run, can } = await requireTenant(slug, "view");
   const { invoice, customers, payments } = await run(async (tx) => ({
     invoice: await getInvoice(tx, id),
     customers: await listCustomers(tx),
@@ -143,13 +143,17 @@ export default async function InvoicePage({ params }: { params: Promise<{ slug: 
           />
           <h2>Finalize</h2>
           <p className="muted">Finalizing gives the invoice its number and fixes its lines and totals. It can then only be paid or voided.</p>
-          <ActionForm
-            action={finalizeAction.bind(null, slug, invoice.id)}
-            testId="finalize"
-            fields={[{ name: "netDays", label: "Payment due in (days)", type: "number", inputMode: "numeric", defaultValue: "30" }]}
-            submit="Finalize invoice"
-            pending="Finalizing…"
-          />
+          {can("finalize") ? (
+            <ActionForm
+              action={finalizeAction.bind(null, slug, invoice.id)}
+              testId="finalize"
+              fields={[{ name: "netDays", label: "Payment due in (days)", type: "number", inputMode: "numeric", defaultValue: "30" }]}
+              submit="Finalize invoice"
+              pending="Finalizing…"
+            />
+          ) : (
+            <p data-testid="finalize-needs-role">An owner or an admin finalizes invoices.</p>
+          )}
           <ActionForm action={deleteDraftAction.bind(null, slug, invoice.id)} testId="delete-draft" submit="Delete draft" pending="Deleting…" danger />
         </>
       ) : invoice.status === "OPEN" ? (
@@ -159,11 +163,19 @@ export default async function InvoicePage({ params }: { params: Promise<{ slug: 
             A payment link opens a hosted checkout page for {money(invoice.totals.total)}; send it to the customer. The invoice is
             marked paid when the payment provider confirms the payment.
           </p>
-          <div className="row">
-            <ActionForm action={collectPaymentAction.bind(null, slug, invoice.id)} testId="collect-payment" submit="Create payment link" pending="Creating…" />
-            <ActionForm action={markPaidAction.bind(null, slug, invoice.id)} testId="mark-paid" submit="Mark paid" pending="Saving…" />
-            <ActionForm action={voidAction.bind(null, slug, invoice.id)} testId="void" submit="Void invoice" pending="Voiding…" danger />
-          </div>
+          {can("collect-payment") || can("mark-paid") || can("void") ? (
+            <div className="row">
+              {can("collect-payment") ? (
+                <ActionForm action={collectPaymentAction.bind(null, slug, invoice.id)} testId="collect-payment" submit="Create payment link" pending="Creating…" />
+              ) : null}
+              {can("mark-paid") ? (
+                <ActionForm action={markPaidAction.bind(null, slug, invoice.id)} testId="mark-paid" submit="Mark paid" pending="Saving…" />
+              ) : null}
+              {can("void") ? <ActionForm action={voidAction.bind(null, slug, invoice.id)} testId="void" submit="Void invoice" pending="Voiding…" danger /> : null}
+            </div>
+          ) : (
+            <p data-testid="payment-needs-role">An owner or an admin creates payment links, marks invoices paid and voids them.</p>
+          )}
         </>
       ) : null}
 

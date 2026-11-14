@@ -8,7 +8,7 @@ import { createDraftAction } from "../actions";
 
 export default async function InvoicesPage({ params }: { params: Promise<{ slug: string }> }) {
   const { slug } = await params;
-  const { organization, run } = await requireTenant(slug);
+  const { organization, run } = await requireTenant(slug, "view");
   const { invoices, customers } = await run(async (tx) => ({ invoices: await listInvoices(tx), customers: await listCustomers(tx) }));
   return (
     <section className="stack">

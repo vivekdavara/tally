@@ -227,11 +227,25 @@ user's id (`sub`).
 |---|---|---|---|
 | View customers and invoices | yes | yes | yes |
 | Create and edit customers, draft invoices | yes | yes | yes |
-| Finalize, void, mark paid | yes | yes | no |
-| Invite and remove members, change roles | yes | yes (not owners) | no |
-| Billing settings, delete organization | yes | no | no |
+| Finalize, void, mark paid, create payment links | yes | yes | no |
+| Invite and remove members, change roles (below owner) | yes | yes | no |
+| Make, change or remove an owner | yes | no | no |
 
-D1 stores the role; D4 enforces this table in the data access layer and tests every cell of it.
+D1 stored the role; D4 enforces this table. Each row is one or more named permissions in
+`src/server/orgs/permissions.ts` (`tests/unit/permissions.test.ts` checks the two agree, cell by cell), and every
+page and Server Action states the one it needs: `requireTenant(slug, permission)` takes it as a required argument.
+
+- **Checked twice.** `requireTenant` refuses a role without the permission (`Forbidden`, which the Server Actions show
+  as a form error) before any tenant data is read. Then `run` reads the role again as the first statement of its
+  transaction, `FOR SHARE`: a member demoted or removed between the two sees the refusal (or the 404) they would get
+  now, and a role change that commits while an action is running waits for that action's transaction to end, so no
+  write is made under a role that was already gone. `tests/integration/roles.test.ts` calls every Server Action as
+  each role and checks the effect or the refusal (and that nothing changed), and a test there fails when an action is
+  added without a case.
+- **Pages show what the role can do** (`tenant.can(...)`): a member sees no Finalize, Mark paid, Void or payment-link
+  buttons. Hiding is for clarity; the refusal in the action is what enforces it.
+- Organization deletion and billing settings have no route: the app role can't delete an organization at all (an
+  administrator does, as the owner role), and billing has no per-organization settings yet.
 
 ## Invoices
 

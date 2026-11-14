@@ -5,7 +5,7 @@ import { SignOutButton } from "../../sign-out-button";
 export default async function OrganizationPage({ params }: { params: Promise<{ slug: string }> }) {
   const { slug } = await params;
   // `run` is bound to the organization the membership check found; the page never handles its id.
-  const { organization, role, user, run } = await requireTenant(slug);
+  const { organization, role, user, run } = await requireTenant(slug, "view");
   const counts = await run(async (tx) => ({
     customers: await tx.customer.count(),
     invoices: await tx.invoice.count(),

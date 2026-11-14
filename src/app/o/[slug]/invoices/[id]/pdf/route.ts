@@ -7,7 +7,7 @@ import { getInvoice } from "@/server/invoices/service";
 // answers anyone else with the same 404 as a missing organization). A draft renders too, marked as a draft.
 export async function GET(_request: Request, { params }: { params: Promise<{ slug: string; id: string }> }) {
   const { slug, id } = await params;
-  const { organization, run } = await requireTenant(slug);
+  const { organization, run } = await requireTenant(slug, "view");
   const invoice = await run((tx) => getInvoice(tx, id));
   if (!invoice) {
     return new Response("Not found", { status: 404, headers: { "Content-Type": "text/plain; charset=utf-8" } });

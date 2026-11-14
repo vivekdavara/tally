@@ -113,7 +113,7 @@ describe("requireTenant", () => {
   it("runs work in the member's organization only", async () => {
     const { requireTenant } = await import("@/server/dal");
     session.current = { user: { id: owner.userId } };
-    const tenant = await requireTenant(owner.slug);
+    const tenant = await requireTenant(owner.slug, "view");
     const seen = await tenant.run((tx) =>
       tx.$queryRaw<{ org: string }[]>`SELECT current_setting('app.organization_id') AS org`,
     );
@@ -123,7 +123,7 @@ describe("requireTenant", () => {
   it("is the same 404 as requireMembership for a non-member", async () => {
     const { requireTenant } = await import("@/server/dal");
     session.current = { user: { id: outsider.userId } };
-    expect(await digestOf(requireTenant(owner.slug))).toBe("NEXT_HTTP_ERROR_FALLBACK;404");
+    expect(await digestOf(requireTenant(owner.slug, "view"))).toBe("NEXT_HTTP_ERROR_FALLBACK;404");
   });
 });
 

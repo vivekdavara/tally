@@ -7,7 +7,7 @@ import { deleteCustomerAction, updateCustomerAction } from "../../actions";
 
 export default async function CustomerPage({ params }: { params: Promise<{ slug: string; id: string }> }) {
   const { slug, id } = await params;
-  const { organization, run } = await requireTenant(slug);
+  const { organization, run } = await requireTenant(slug, "view");
   const customer = await run((tx) => getCustomer(tx, id));
   // Another organization's customer is invisible here: the same 404 as an id that doesn't exist.
   if (!customer) notFound();

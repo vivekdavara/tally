@@ -6,7 +6,7 @@ import { createCustomerAction } from "../actions";
 
 export default async function CustomersPage({ params }: { params: Promise<{ slug: string }> }) {
   const { slug } = await params;
-  const { organization, run } = await requireTenant(slug);
+  const { organization, run } = await requireTenant(slug, "view");
   const customers = await run((tx) => listCustomers(tx));
   return (
     <section className="stack">

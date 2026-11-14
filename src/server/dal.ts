@@ -5,6 +5,8 @@ import type { VerifiedCheckoutEvent } from "./billing/events";
 import { db } from "./db/client";
 import { withTenant, type TenantTx } from "./db/tenant";
 import { findMembership, type MembershipView } from "./orgs/memberships";
+import { allows, Forbidden, type Permission } from "./orgs/permissions";
+import type { Role } from "@/generated/prisma/client";
 
 // The data access layer (DESIGN.md, "Layer 1"). Every page and Server Action that touches tenant data
 // starts here. React's cache() dedupes the lookups within one request only.
@@ -51,19 +53,56 @@ export const requireMembership = cache(async (slug: string): Promise<MembershipV
 
 export interface Tenant extends MembershipView {
   user: CurrentUser;
-  /** Runs `fn` in a withTenant transaction for this membership's organization, and no other. */
+  /** Whether this member's role (as read at the start of the request) allows `permission`; for showing controls. */
+  can(permission: Permission): boolean;
+  /**
+   * Runs `fn` in a withTenant transaction for this membership's organization, and no other, after reading the
+   * member's role again inside it (locked, so a concurrent role change waits): a member removed or demoted since
+   * the request began gets the 404 or the Forbidden it would get now.
+   */
   run<T>(fn: (tx: TenantTx) => Promise<T>): Promise<T>;
+}
+
+/**
+ * The role a user has in the transaction's organization, locked FOR SHARE until the transaction ends (a role
+ * change or removal, which takes the row's update lock, waits for it), or null if they aren't a member.
+ */
+export async function lockedRole(tx: TenantTx, userId: string): Promise<Role | null> {
+  const rows = await tx.$queryRaw<{ role: Role }[]>`
+    SELECT role FROM memberships
+     WHERE organization_id = NULLIF(current_setting('app.organization_id', true), '')::uuid
+       AND user_id = ${userId}::uuid
+       FOR SHARE`;
+  return rows[0]?.role ?? null;
 }
 
 /**
  * requireMembership plus a `run` bound to that membership's organization: the way pages and Server Actions
  * reach tenant data. They never hold an organization id to pass to withTenant, so they can't pass the
  * wrong one (tests/unit/architecture.test.ts checks withTenant is called only here).
+ *
+ * `permission` is what the caller is about to do (src/server/orgs/permissions.ts). A role without it is refused
+ * with Forbidden here, before any tenant data is read, and again inside `run`'s transaction. A non-member gets the
+ * same 404 as a missing organization, whatever the permission.
  */
-export async function requireTenant(slug: string): Promise<Tenant> {
+export async function requireTenant(slug: string, permission: Permission): Promise<Tenant> {
   const membership = await requireMembership(slug);
+  if (!allows(membership.role, permission)) {
+    throw new Forbidden(permission, membership.role);
+  }
   const organizationId = membership.organization.id;
-  return { ...membership, run: (fn) => withTenant(organizationId, fn) };
+  const userId = membership.user.id;
+  return {
+    ...membership,
+    can: (p) => allows(membership.role, p),
+    run: (fn) =>
+      withTenant(organizationId, async (tx) => {
+        const role = await lockedRole(tx, userId);
+        if (!role) notFound();
+        if (!allows(role, permission)) throw new Forbidden(permission, role);
+        return fn(tx);
+      }),
+  };
 }
 
 /**
