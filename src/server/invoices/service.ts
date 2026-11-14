@@ -12,8 +12,8 @@ import type { CustomerInput, DraftInput, DraftUpdateInput, ParsedLine } from "./
 
 export type Result<T = undefined> = { ok: true; value: T } | { ok: false; reason: string };
 
-const ok = <T>(value: T): Result<T> => ({ ok: true, value });
-const fail = (reason: string): Result<never> => ({ ok: false, reason });
+export const ok = <T>(value: T): Result<T> => ({ ok: true, value });
+export const fail = (reason: string): Result<never> => ({ ok: false, reason });
 
 /** The organization this transaction is bound to: the setting row-level security reads. */
 async function tenantId(tx: TenantTx): Promise<string> {
@@ -304,6 +304,8 @@ export const voidInvoice = (tx: TenantTx, id: string) => transition(tx, id, "VOI
 /** Unique keys whose violation means something to the user, by constraint name. */
 const UNIQUE_REASONS: Record<string, string> = {
   customers_organization_id_email_key: "email-taken",
+  // Two invitations for one address at the same moment: the second finds the first's open row.
+  invitations_one_open_per_email: "invite-busy",
 };
 
 /** The trigger codes (migrations/*_invoicing) as Result reasons, for callers that catch them. */
@@ -316,6 +318,10 @@ export const TRIGGER_REASONS: Record<string, string> = {
   TL007: "not-open",
   TL008: "final",
   TL009: "too-many-lines",
+  // migrations/*_members. TL017 and TL019 (a membership's user changed, an invitation's fixed columns changed) stay
+  // errors, like TL010.
+  TL018: "last-owner",
+  TL020: "invitation-closed",
   // TL010 (invoice_counters_guard) is deliberately not here: only a bug or an attack reaches it, so it stays an
   // error, logged, rather than a message (review round 2).
 };

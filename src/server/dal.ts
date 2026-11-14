@@ -5,8 +5,9 @@ import type { VerifiedCheckoutEvent } from "./billing/events";
 import { db } from "./db/client";
 import { withTenant, type TenantTx } from "./db/tenant";
 import { findMembership, type MembershipView } from "./orgs/memberships";
+import type { InvitationLink } from "./orgs/members";
 import { allows, Forbidden, type Permission } from "./orgs/permissions";
-import type { Role } from "@/generated/prisma/client";
+import { lockedRole, serializeMembershipChanges } from "./orgs/locked-role";
 
 // The data access layer (DESIGN.md, "Layer 1"). Every page and Server Action that touches tenant data
 // starts here. React's cache() dedupes the lookups within one request only.
@@ -64,19 +65,6 @@ export interface Tenant extends MembershipView {
 }
 
 /**
- * The role a user has in the transaction's organization, locked FOR SHARE until the transaction ends (a role
- * change or removal, which takes the row's update lock, waits for it), or null if they aren't a member.
- */
-export async function lockedRole(tx: TenantTx, userId: string): Promise<Role | null> {
-  const rows = await tx.$queryRaw<{ role: Role }[]>`
-    SELECT role FROM memberships
-     WHERE organization_id = NULLIF(current_setting('app.organization_id', true), '')::uuid
-       AND user_id = ${userId}::uuid
-       FOR SHARE`;
-  return rows[0]?.role ?? null;
-}
-
-/**
  * requireMembership plus a `run` bound to that membership's organization: the way pages and Server Actions
  * reach tenant data. They never hold an organization id to pass to withTenant, so they can't pass the
  * wrong one (tests/unit/architecture.test.ts checks withTenant is called only here).
@@ -97,6 +85,7 @@ export async function requireTenant(slug: string, permission: Permission): Promi
     can: (p) => allows(membership.role, p),
     run: (fn) =>
       withTenant(organizationId, async (tx) => {
+        if (permission === "manage-members" || permission === "manage-owners") await serializeMembershipChanges(tx);
         const role = await lockedRole(tx, userId);
         if (!role) notFound();
         if (!allows(role, permission)) throw new Forbidden(permission, role);
@@ -113,4 +102,13 @@ export async function requireTenant(slug: string, permission: Permission): Promi
  */
 export function runForStripeEvent<T>(event: VerifiedCheckoutEvent, fn: (tx: TenantTx) => Promise<T>): Promise<T> {
   return withTenant(event.organizationId, fn);
+}
+
+/**
+ * The invitation page's way in (src/app/invite): a transaction for the organization an invitation link names. There
+ * is no membership yet; the authority is the link's secret, which the caller looks up by its digest under that
+ * organization's row security, so a link naming another organization finds nothing.
+ */
+export function runForInvitation<T>(link: InvitationLink, fn: (tx: TenantTx) => Promise<T>): Promise<T> {
+  return withTenant(link.organizationId, fn);
 }

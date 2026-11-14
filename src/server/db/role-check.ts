@@ -12,6 +12,7 @@ export const APP_TABLES = [
   "invoice_counters",
   "payments",
   "stripe_events",
+  "invitations",
 ] as const;
 
 /** Tables under row-level security: the tenant tables, and memberships (writes only). */
@@ -87,6 +88,15 @@ export const FORBIDDEN: { table: string; privilege: string; column?: string }[] 
   { table: "payments", privilege: "DELETE" },
   ...["type", "payment_id", "stripe_created_at"].map((column) => ({ table: "stripe_events", privilege: "UPDATE", column })),
   { table: "stripe_events", privilege: "DELETE" },
+  // Members (migrations/*_members): an invitation's address, role and token are written once; its times come from
+  // the database's clock; it is never deleted. A membership's user never changes (its role does).
+  ...["email", "role", "token_hash", "invited_by", "created_at", "expires_at", "accepted_at"].map((column) => ({
+    table: "invitations",
+    privilege: "UPDATE",
+    column,
+  })),
+  ...["created_at", "expires_at", "accepted_at", "accepted_by", "revoked_at"].map((column) => ({ table: "invitations", privilege: "INSERT", column })),
+  { table: "invitations", privilege: "DELETE" },
 ];
 
 /**
@@ -101,6 +111,8 @@ export const EXPECTED_TRIGGERS: { table: string; name: string }[] = [
   { table: "invoice_counters", name: "invoice_counters_guard" },
   { table: "payments", name: "payments_guard" },
   { table: "stripe_events", name: "stripe_events_guard" },
+  { table: "memberships", name: "memberships_guard" },
+  { table: "invitations", name: "invitations_guard" },
 ];
 
 export interface RoleFacts {

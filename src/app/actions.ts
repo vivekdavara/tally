@@ -8,6 +8,8 @@ import { signUp } from "@/server/auth/signup";
 
 export interface FormState {
   error?: string;
+  /** Something to show after success (an invitation link). */
+  notice?: string;
   fieldErrors?: Partial<Record<string, string[]>>;
   values?: Record<string, string>;
 }

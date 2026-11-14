@@ -70,6 +70,7 @@ model Organization {
   invoiceCounter InvoiceCounter?
   payments       Payment[]
   stripeEvents   StripeEvent[]
+  invitations    Invitation[]
 
   @@map("organizations")
 }
@@ -232,4 +233,30 @@ model StripeEvent {
 
   @@index([organizationId, paymentId])
   @@map("stripe_events")
+}
+
+// An invitation to join an organization with a role (DESIGN.md, "Members and invitations"). The link carries a
+// random token; only its SHA-256 digest is stored. The invitations_guard trigger keeps it open until it is
+// accepted (before it expires) or revoked, once, and takes every time from the database's clock.
+model Invitation {
+  id             String       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  organizationId String       @map("organization_id") @db.Uuid
+  // Stored trimmed and lower-cased, like users' emails; only the user with this email can accept.
+  email          String
+  role           Role
+  tokenHash      Bytes        @map("token_hash")
+  // Who invited (a user id, kept as a record: no foreign key, so deleting that user leaves the history).
+  invitedBy      String       @map("invited_by") @db.Uuid
+  createdAt      DateTime     @default(dbgenerated("clock_timestamp()")) @map("created_at") @db.Timestamptz(3)
+  expiresAt      DateTime     @default(dbgenerated("(clock_timestamp() + '7 days'::interval)")) @map("expires_at") @db.Timestamptz(3)
+  acceptedAt     DateTime?    @map("accepted_at") @db.Timestamptz(3)
+  acceptedBy     String?      @map("accepted_by") @db.Uuid
+  revokedAt      DateTime?    @map("revoked_at") @db.Timestamptz(3)
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@unique([organizationId, id])
+  // Unique per organization (unique checks ignore row security, so keys on tenant tables start with
+  // organization_id); the link names the organization, so the lookup is by both.
+  @@unique([organizationId, tokenHash])
+  @@map("invitations")
 }

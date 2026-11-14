@@ -72,6 +72,11 @@ export function ActionForm(props: {
           {state.error}
         </p>
       ) : null}
+      {state.notice ? (
+        <p className="notice" role="status">
+          <output data-testid={`${props.testId ?? "f"}-notice`}>{state.notice}</output>
+        </p>
+      ) : null}
       <button type="submit" disabled={pending} className={props.danger ? "danger" : undefined}>
         {pending ? props.pending : props.submit}
       </button>

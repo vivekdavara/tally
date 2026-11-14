@@ -32,6 +32,7 @@ export default async function OrganizationPage({ params }: { params: Promise<{ s
       <p className="row">
         <Link href={`/o/${slug}/customers`}>Customers</Link>
         <Link href={`/o/${slug}/invoices`}>Invoices</Link>
+        <Link href={`/o/${slug}/members`}>Members</Link>
       </p>
       <SignOutButton />
     </section>
