@@ -58,7 +58,7 @@ describe("the role check against Postgres", () => {
 
   it("refuses the owner role, which could switch row-level security off", async () => {
     await expect(assertSafeAppRole(owner)).rejects.toThrow(
-      /refusing to serve: .*tally_owner owns or can become the owner of customers, invitations, invoice_counters, invoice_lines, invoices, memberships, organizations, payments, stripe_events, users/,
+      /refusing to serve: .*tally_owner owns or can become the owner of customers, invitations, invoice_counters, invoice_lines, invoices, memberships, organizations, payments, reminders, stripe_events, users/,
     );
   });
 

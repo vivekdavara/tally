@@ -6,7 +6,7 @@ import { join, relative } from "node:path";
 import { describe, expect, it } from "vitest";
 
 const ROOT = join(import.meta.dirname, "..", "..");
-const TENANT_MODELS = ["customer", "invoice", "invoiceLine", "payment", "stripeEvent", "invitation"];
+const TENANT_MODELS = ["customer", "invoice", "invoiceLine", "payment", "stripeEvent", "invitation", "reminder"];
 
 function sources(dir: string): string[] {
   return readdirSync(dir).flatMap((name) => {

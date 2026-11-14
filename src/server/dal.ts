@@ -112,3 +112,25 @@ export function runForStripeEvent<T>(event: VerifiedCheckoutEvent, fn: (tx: Tena
 export function runForInvitation<T>(link: InvitationLink, fn: (tx: TenantTx) => Promise<T>): Promise<T> {
   return withTenant(link.organizationId, fn);
 }
+
+/**
+ * Background jobs' way in (src/server/reminders/job.ts): calls `fn` for every organization in turn, oldest first,
+ * with a run bound to that organization's withTenant. There is no user and no membership; the job acts for every
+ * tenant, one transaction per step, so row-level security still limits each step to one of them.
+ */
+export async function forEachOrganization(fn: (organizationId: string, run: <T>(f: (tx: TenantTx) => Promise<T>) => Promise<T>) => Promise<void>): Promise<void> {
+  let after: { createdAt: Date; id: string } | null = null;
+  for (;;) {
+    const page: { id: string; createdAt: Date }[] = await db().organization.findMany({
+      where: after ? { OR: [{ createdAt: { gt: after.createdAt } }, { createdAt: after.createdAt, id: { gt: after.id } }] } : {},
+      orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+      select: { id: true, createdAt: true },
+      take: 200,
+    });
+    for (const org of page) {
+      await fn(org.id, (f) => withTenant(org.id, f));
+    }
+    if (page.length < 200) return;
+    after = page.at(-1)!;
+  }
+}

@@ -71,6 +71,7 @@ model Organization {
   payments       Payment[]
   stripeEvents   StripeEvent[]
   invitations    Invitation[]
+  reminders      Reminder[]
 
   @@map("organizations")
 }
@@ -138,6 +139,7 @@ model Invoice {
   customer       Customer      @relation(fields: [organizationId, customerId], references: [organizationId, id], onDelete: NoAction, onUpdate: NoAction)
   lines          InvoiceLine[]
   payments       Payment[]
+  reminders      Reminder[]
 
   @@unique([organizationId, id])
   @@unique([organizationId, number])
@@ -259,4 +261,30 @@ model Invitation {
   // organization_id); the link names the organization, so the lookup is by both.
   @@unique([organizationId, tokenHash])
   @@map("invitations")
+}
+
+// An overdue reminder for an open invoice (DESIGN.md, "Overdue reminders"): queued by the background job at most once
+// per stage (1, 7, 14 and 30 days past due), sent through the mailer between two transactions, retried with backoff.
+// The reminders_guard trigger queues it only for an open invoice that is that overdue, addresses it to the invoice's
+// bill-to email, and records the sending once.
+model Reminder {
+  id             String       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  organizationId String       @map("organization_id") @db.Uuid
+  invoiceId      String       @map("invoice_id") @db.Uuid
+  // Days past due this reminder is for.
+  stage          Int          @db.SmallInt
+  // The invoice's bill-to email when the reminder was queued (set by the trigger).
+  recipient      String
+  createdAt      DateTime     @default(dbgenerated("clock_timestamp()")) @map("created_at") @db.Timestamptz(3)
+  attempts       Int          @default(0)
+  // The sender's lease: a claimed reminder's next attempt is pushed out first, so a crashed sender's claim lapses.
+  nextAttemptAt  DateTime     @default(dbgenerated("clock_timestamp()")) @map("next_attempt_at") @db.Timestamptz(3)
+  lastError      String?      @map("last_error")
+  sentAt         DateTime?    @map("sent_at") @db.Timestamptz(3)
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  invoice        Invoice      @relation(fields: [organizationId, invoiceId], references: [organizationId, id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@unique([organizationId, id])
+  @@unique([organizationId, invoiceId, stage])
+  @@map("reminders")
 }

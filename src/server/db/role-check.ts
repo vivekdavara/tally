@@ -13,6 +13,7 @@ export const APP_TABLES = [
   "payments",
   "stripe_events",
   "invitations",
+  "reminders",
 ] as const;
 
 /** Tables under row-level security: the tenant tables, and memberships (writes only). */
@@ -97,6 +98,11 @@ export const FORBIDDEN: { table: string; privilege: string; column?: string }[] 
   })),
   ...["created_at", "expires_at", "accepted_at", "accepted_by", "revoked_at"].map((column) => ({ table: "invitations", privilege: "INSERT", column })),
   { table: "invitations", privilege: "DELETE" },
+  // Reminders (migrations/*_reminders): which invoice, stage and recipient is written once (the recipient by the
+  // trigger, from the invoice); only the sending bookkeeping changes; never deleted.
+  ...["invoice_id", "stage", "recipient", "created_at"].map((column) => ({ table: "reminders", privilege: "UPDATE", column })),
+  ...["recipient", "created_at", "attempts", "next_attempt_at", "last_error", "sent_at"].map((column) => ({ table: "reminders", privilege: "INSERT", column })),
+  { table: "reminders", privilege: "DELETE" },
 ];
 
 /**
@@ -113,6 +119,7 @@ export const EXPECTED_TRIGGERS: { table: string; name: string }[] = [
   { table: "stripe_events", name: "stripe_events_guard" },
   { table: "memberships", name: "memberships_guard" },
   { table: "invitations", name: "invitations_guard" },
+  { table: "reminders", name: "reminders_guard" },
 ];
 
 export interface RoleFacts {
