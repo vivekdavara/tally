@@ -9,7 +9,7 @@ import { claimReminders, markFailed, markSent, queueDueReminders, reminderMessag
 export type OrganizationRun = <T>(fn: (tx: TenantTx) => Promise<T>) => Promise<T>;
 
 export interface ReminderJobDeps {
-  /** Calls `fn` for every organization, with a run bound to it (src/server/dal.ts, forEachOrganization). */
+  /** Calls `fn` for every organization, with a run bound to it (forEachOrganization in src/server/db/tenant.ts). */
   forEachOrganization(fn: (organizationId: string, run: OrganizationRun) => Promise<void>): Promise<void>;
   mailer: Mailer;
   appBaseUrl: string;

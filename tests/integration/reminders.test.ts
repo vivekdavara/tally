@@ -2,16 +2,14 @@
 // per stage (also with two workers at once), retries with backoff, a lapsed claim after a crash, giving up, and the
 // rules the reminders_guard trigger keeps for any writer. Time passing is simulated by moving an invoice's due date
 // back as a superuser with triggers off: nothing the application can do.
-import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
-import { withTenant } from "@/server/db/tenant";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { forEachOrganization, withTenant } from "@/server/db/tenant";
 import { MemoryMailer, type MailMessage } from "@/server/mail/mailer";
 import { runReminderJob, type ReminderJobDeps } from "@/server/reminders/job";
 import { backoffSeconds, claimReminders, listReminders, MAX_ATTEMPTS, queueDueReminders } from "@/server/reminders/service";
 import { markPaid } from "@/server/invoices/service";
-import { db, openInvoice, sessions, world, type World } from "../fixtures/org";
+import { db, openInvoice, world, type World } from "../fixtures/org";
 import { adminDb, appDb } from "../helpers";
-
-vi.mock("@/auth", () => ({ auth: async () => sessions.current }));
 
 const admin = adminDb({ max: 2 });
 const app = appDb({ max: 4 });
@@ -204,8 +202,7 @@ describe("the job", () => {
     ]);
   });
 
-  it("runs over every organization through the data access layer, each in its own tenant", async () => {
-    const { forEachOrganization } = await import("@/server/dal");
+  it("runs over every organization (forEachOrganization), each in its own tenant", async () => {
     const seen: string[] = [];
     const others = new Set<string>();
     await forEachOrganization(async (organizationId, run) => {

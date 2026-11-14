@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { listPayments } from "@/server/billing/service";
+import { listReminders } from "@/server/reminders/service";
 import { requireTenant } from "@/server/dal";
 import { formatDate, invoiceLabel, STATUS_LABELS } from "@/server/invoices/format";
 import { formatMoney, formatQuantity, formatTaxRate, toMajorString } from "@/server/invoices/money";
@@ -28,10 +29,11 @@ const PAYMENT_LABELS = {
 export default async function InvoicePage({ params }: { params: Promise<{ slug: string; id: string }> }) {
   const { slug, id } = await params;
   const { organization, run, can } = await requireTenant(slug, "view");
-  const { invoice, customers, payments } = await run(async (tx) => ({
+  const { invoice, customers, payments, reminders } = await run(async (tx) => ({
     invoice: await getInvoice(tx, id),
     customers: await listCustomers(tx),
     payments: await listPayments(tx, id),
+    reminders: await listReminders(tx, id),
   }));
   if (!invoice) notFound();
   const money = (minor: bigint) => formatMoney(minor, invoice.currency);
@@ -176,6 +178,36 @@ export default async function InvoicePage({ params }: { params: Promise<{ slug: 
           ) : (
             <p data-testid="payment-needs-role">An owner or an admin creates payment links, marks invoices paid and voids them.</p>
           )}
+        </>
+      ) : null}
+
+      {reminders.length > 0 ? (
+        <>
+          <h2>Overdue reminders</h2>
+          <table data-testid="reminders">
+            <thead>
+              <tr>
+                <th>Overdue by</th>
+                <th>To</th>
+                <th>Status</th>
+              </tr>
+            </thead>
+            <tbody>
+              {reminders.map((r) => (
+                <tr key={r.stage} data-stage={r.stage} data-sent={r.sentAt ? "yes" : "no"}>
+                  <td>{r.stage === 1 ? "1 day" : `${r.stage} days`}</td>
+                  <td>{invoice.customer.email}</td>
+                  <td>
+                    {r.sentAt
+                      ? `Sent ${formatDate(r.sentAt)}`
+                      : r.attempts === 0
+                        ? "Queued"
+                        : `Not sent yet (${r.attempts} ${r.attempts === 1 ? "attempt" : "attempts"}${r.lastError ? `: ${r.lastError}` : ""})`}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
         </>
       ) : null}
 
