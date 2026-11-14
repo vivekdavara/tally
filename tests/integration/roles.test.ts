@@ -3,14 +3,16 @@
 // The session is mocked (Auth.js needs a request); everything else is the real action against Postgres.
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import type { Role } from "@/generated/prisma/client";
+import { invite } from "@/server/orgs/members";
 import { allows, Forbidden, type Permission } from "@/server/orgs/permissions";
-import { db, draft, formData, openInvoice, outcome, sessions, signInAs, world, type Outcome, type World } from "../fixtures/org";
+import { addMember, db, draft, formData, openInvoice, outcome, person, sessions, signInAs, world, type Outcome, type World } from "../fixtures/org";
 import { ownerDb } from "../helpers";
 
 vi.mock("@/auth", () => ({ auth: async () => sessions.current }));
 vi.mock("next/cache", () => ({ revalidatePath: () => {} }));
 
 const actions = await import("@/app/o/[slug]/actions");
+const memberActions = await import("@/app/o/[slug]/members/actions");
 const { FORBIDDEN_MESSAGE } = await import("@/app/o/[slug]/guard");
 const { requireTenant } = await import("@/server/dal");
 
@@ -29,7 +31,11 @@ const ROLE_OF = (role: Role) => (role === "OWNER" ? w.owner : role === "ADMIN" ?
 
 interface Case {
   action: string;
+  /** Distinguishes several cases of one action. */
+  variant?: string;
   permission: Permission;
+  /** The refusal a role gets when it passes the action's first check but not the service's rank rule. */
+  rankRefusal?: string;
   /** Makes what the action works on; returns the action call and a probe of the state it changes. */
   prepare(): Promise<{ call: () => Promise<unknown>; probe: () => Promise<unknown> }>;
 }
@@ -155,21 +161,111 @@ const CASES: Case[] = [
   },
 ];
 
+// The members page's actions. Each needs manage-members to get in; making, changing or removing an owner needs
+// manage-owners, which the service checks (an admin gets its message, a member the Forbidden one).
+const OWNER_ONLY = "Only an owner can make, change or remove an owner.";
+const roleIn = (userId: string) =>
+  w.run((tx) => tx.membership.findUnique({ where: { organizationId_userId: { organizationId: w.organizationId, userId } }, select: { role: true } }));
+const newcomer = async (role: Role) => {
+  const p = await person("target");
+  await addMember(w.organizationId, p.userId, role);
+  return p;
+};
+const openInvitations = (email: string) => w.run((tx) => tx.invitation.count({ where: { email, acceptedAt: null, revokedAt: null } }));
+
+CASES.push(
+  {
+    action: "inviteAction",
+    permission: "manage-members",
+    async prepare() {
+      const email = `invited-${fresh()}@example.com`;
+      return { call: () => memberActions.inviteAction(w.slug, {}, formData({ email, role: "MEMBER" })), probe: () => openInvitations(email) };
+    },
+  },
+  {
+    action: "inviteAction",
+    variant: "an owner",
+    permission: "manage-owners",
+    rankRefusal: OWNER_ONLY,
+    async prepare() {
+      const email = `invited-owner-${fresh()}@example.com`;
+      return { call: () => memberActions.inviteAction(w.slug, {}, formData({ email, role: "OWNER" })), probe: () => openInvitations(email) };
+    },
+  },
+  {
+    action: "changeRoleAction",
+    permission: "manage-members",
+    async prepare() {
+      const p = await newcomer("MEMBER");
+      return { call: () => memberActions.changeRoleAction(w.slug, p.userId, {}, formData({ role: "ADMIN" })), probe: () => roleIn(p.userId) };
+    },
+  },
+  {
+    action: "changeRoleAction",
+    variant: "to owner",
+    permission: "manage-owners",
+    rankRefusal: OWNER_ONLY,
+    async prepare() {
+      const p = await newcomer("ADMIN");
+      return { call: () => memberActions.changeRoleAction(w.slug, p.userId, {}, formData({ role: "OWNER" })), probe: () => roleIn(p.userId) };
+    },
+  },
+  {
+    action: "changeRoleAction",
+    variant: "of an owner",
+    permission: "manage-owners",
+    rankRefusal: OWNER_ONLY,
+    async prepare() {
+      const p = await newcomer("OWNER");
+      return { call: () => memberActions.changeRoleAction(w.slug, p.userId, {}, formData({ role: "MEMBER" })), probe: () => roleIn(p.userId) };
+    },
+  },
+  {
+    action: "removeMemberAction",
+    permission: "manage-members",
+    async prepare() {
+      const p = await newcomer("MEMBER");
+      return { call: () => memberActions.removeMemberAction(w.slug, p.userId), probe: () => roleIn(p.userId) };
+    },
+  },
+  {
+    action: "removeMemberAction",
+    variant: "an owner",
+    permission: "manage-owners",
+    rankRefusal: OWNER_ONLY,
+    async prepare() {
+      const p = await newcomer("OWNER");
+      return { call: () => memberActions.removeMemberAction(w.slug, p.userId), probe: () => roleIn(p.userId) };
+    },
+  },
+  {
+    action: "revokeInvitationAction",
+    permission: "manage-members",
+    async prepare() {
+      const email = `revoke-${fresh()}@example.com`;
+      const made = await w.run((tx) => invite(tx, w.owner.userId, email, "MEMBER"));
+      if (!made.ok) throw new Error(made.reason);
+      const id = made.value.id;
+      return { call: () => memberActions.revokeInvitationAction(w.slug, id), probe: () => openInvitations(email) };
+    },
+  },
+);
+
 const succeeded = (o: Outcome) => "redirect" in o || ("state" in o && !o.state.error && !o.state.fieldErrors);
 
 describe("every Server Action of /o/[slug]", () => {
   it("has a case here (a new action needs one)", () => {
-    const exported = Object.entries(actions)
+    const exported = [...Object.entries(actions), ...Object.entries(memberActions)]
       .filter(([, v]) => typeof v === "function")
       .map(([k]) => k)
       .sort();
-    expect(exported).toEqual(CASES.map((c) => c.action).sort());
+    expect(exported).toEqual([...new Set(CASES.map((c) => c.action))].sort());
   });
 
   for (const c of CASES) {
     for (const role of ["OWNER", "ADMIN", "MEMBER"] as const) {
       const expected = allows(role, c.permission);
-      it(`${c.action} as ${role.toLowerCase()}: ${expected ? "allowed" : "refused"}`, async () => {
+      it(`${c.action}${c.variant ? ` (${c.variant})` : ""} as ${role.toLowerCase()}: ${expected ? "allowed" : "refused"}`, async () => {
         const { call, probe } = await c.prepare();
         const before = await probe();
         signInAs(ROLE_OF(role));
@@ -179,7 +275,10 @@ describe("every Server Action of /o/[slug]", () => {
           expect(succeeded(result), JSON.stringify(result)).toBe(true);
           expect(after).not.toEqual(before);
         } else {
-          expect(result).toEqual({ state: { error: FORBIDDEN_MESSAGE } });
+          // Members get in only with manage-members; past that, the service's rank rule refuses.
+          const message = c.rankRefusal && allows(role, "manage-members") ? c.rankRefusal : FORBIDDEN_MESSAGE;
+          expect(result).toMatchObject({ state: { error: message } });
+          expect(result).not.toMatchObject({ state: { notice: expect.anything() } });
           expect(after).toEqual(before);
         }
       });
