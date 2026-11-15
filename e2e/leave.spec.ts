@@ -1,8 +1,8 @@
 import { expect, test } from "@playwright/test";
 import { person, signUp } from "./helpers";
 
-// Day 5: a member leaves an organization from its members page, lands on their own list of organizations, and the
-// organization is then a 404 for them, as for anyone outside it. Its only owner can't leave.
+// Day 5: a member leaves an organization from its members page, lands on their organizations (here their only one),
+// and the organization they left is then a 404 for them, as for anyone outside it. Its only owner can't leave.
 
 test("a member leaves and loses access; the only owner can't leave", async ({ browser }) => {
   const ownerContext = await browser.newContext();
@@ -19,7 +19,7 @@ test("a member leaves and loses access; the only owner can't leave", async ({ br
   await invite.getByRole("button", { name: "Create invitation link" }).click();
   const link = (await owner.getByTestId("invite-notice").textContent())!;
 
-  await signUp(member, grace);
+  const graceOrgPath = await signUp(member, grace);
   await member.goto(new URL(link).pathname);
   await member.getByRole("button", { name: "Accept invitation" }).click();
   await expect(member).toHaveURL(new RegExp(`${orgPath}$`));
@@ -27,7 +27,8 @@ test("a member leaves and loses access; the only owner can't leave", async ({ br
   // Grace leaves.
   await member.goto(`${orgPath}/members`);
   await member.getByTestId("leave").getByRole("button", { name: "Leave organization" }).click();
-  await expect(member).toHaveURL(/\/o$/);
+  // To /o, which sends someone with one organization left (Grace's own, from sign-up) straight to it.
+  await expect(member).toHaveURL(new RegExp(`${graceOrgPath}$`));
   expect((await member.goto(orgPath))?.status()).toBe(404);
 
   // Gone from the owner's list too.

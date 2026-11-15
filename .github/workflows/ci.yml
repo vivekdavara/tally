@@ -155,6 +155,20 @@ jobs:
           tail -c 600 owner.log
           test "$status" -eq 1
           grep -q "refusing to serve" owner.log
+      # Before the main web container starts: with --network host, a health check stuck on 8117 would otherwise reach
+      # that container and pass (review round 2 of day 5).
+      - name: the health check follows PORT
+        run: |
+          if curl -s -o /dev/null http://localhost:8117/; then echo "something already listens on 8117"; exit 1; fi
+          docker run -d --name web2 --network host -e PORT=8119 -e DATABASE_URL="$APP_URL" -e AUTH_SECRET="$(openssl rand -base64 32)" tally-web
+          for i in $(seq 90); do
+            status=$(docker inspect -f '{{.State.Health.Status}}' web2)
+            if [ "$status" = healthy ]; then echo "healthy on 8119 after about $i s"; break; fi
+            sleep 1
+          done
+          test "$(docker inspect -f '{{.State.Health.Status}}' web2)" = healthy
+          curl -fsS http://localhost:8119/api/health
+          docker rm -f web2
       - name: start the web image, healthy
         run: |
           secret="whsec_e2e_$(openssl rand -hex 24)"
@@ -166,18 +180,8 @@ jobs:
             if [ "$status" = healthy ]; then echo "healthy after about $i s"; break; fi
             sleep 1
           done
-          docker inspect -f '{{.State.Health.Status}}' web | grep -qx healthy
+          test "$(docker inspect -f '{{.State.Health.Status}}' web)" = healthy
           curl -fsS http://localhost:8117/api/health
-      - name: the health check follows PORT
-        run: |
-          docker run -d --name web2 --network host -e PORT=8119 -e DATABASE_URL="$APP_URL" -e AUTH_SECRET="$(openssl rand -base64 32)" tally-web
-          for i in $(seq 90); do
-            status=$(docker inspect -f '{{.State.Health.Status}}' web2)
-            if [ "$status" = healthy ]; then echo "healthy on 8119 after about $i s"; break; fi
-            sleep 1
-          done
-          docker inspect -f '{{.State.Health.Status}}' web2 | grep -qx healthy
-          docker rm -f web2
       - uses: actions/setup-node@v7
         with:
           node-version: '24'
@@ -190,7 +194,10 @@ jobs:
           E2E_ADMIN_DATABASE_URL: postgresql://postgres@localhost:5432/tally_e2e
       - name: the worker image runs a pass, then stops on SIGTERM with exit 0
         run: |
-          docker run --rm --network host -e DATABASE_URL="$APP_URL" tally-worker node dist/worker.mjs --once | tee once.log
+          # No pipe: under GitHub's default `bash -e` (no pipefail) a pipe would hide the worker's exit code (review
+          # round 2 of day 5). A failed pass exits 1 and fails the step here.
+          docker run --rm --network host -e DATABASE_URL="$APP_URL" tally-worker node dist/worker.mjs --once > once.log 2>&1 || { cat once.log; exit 1; }
+          cat once.log
           grep -q '"job":"reminders"' once.log
           grep -q '"worker":"stopped"' once.log
           docker run -d --name worker --network host -e DATABASE_URL="$APP_URL" tally-worker

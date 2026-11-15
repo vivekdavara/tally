@@ -12,7 +12,7 @@
     "dev": "next dev --port 8117",
     "build": "next build && cp -R .next/static .next/standalone/.next/static && rm -f .next/standalone/.env .next/standalone/.env.* && npm run build:worker",
     "build:worker": "node scripts/build-worker.mjs",
-    "start": "PORT=${PORT:-8117} HOSTNAME=0.0.0.0 node --env-file-if-exists=.env .next/standalone/server.js",
+    "start": "node scripts/start.mjs",
     "postinstall": "prisma generate",
     "typecheck": "tsc --noEmit",
     "lint": "eslint --max-warnings 0 .",
@@ -31,6 +31,7 @@
     "check": "npm run typecheck && npm run lint && npm test"
   },
   "dependencies": {
+    "@next/env": "16.4.5",
     "@prisma/adapter-pg": "7.10.1",
     "@prisma/client": "7.10.1",
     "next": "16.4.5",
