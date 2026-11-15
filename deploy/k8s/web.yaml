@@ -31,8 +31,8 @@ spec:
           envFrom:
             - configMapRef: { name: tally-config }
           env:
-            # Kubernetes sets HOSTNAME to the pod's name, which the standalone server would bind to (the pod's address
-            # only, not loopback); the image's own HOSTNAME=0.0.0.0 doesn't survive that, so it's set here.
+            # The standalone server binds to $HOSTNAME. The image sets 0.0.0.0, and on kind's containerd that value
+            # reaches the pod (CI checks it); set here too, so the binding doesn't depend on the image or the runtime.
             - { name: HOSTNAME, value: 0.0.0.0 }
             - name: DATABASE_URL
               valueFrom: { secretKeyRef: { name: tally-secrets, key: database-url } }

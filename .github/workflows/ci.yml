@@ -320,16 +320,18 @@ jobs:
           for i in $(seq 30); do kubectl logs deployment/tally-worker > worker.log; grep -q '"job":"reminders"' worker.log && break; sleep 1; done
           cat worker.log
           grep -q '"job":"reminders"' worker.log
-      - name: Kubernetes replaces the image's HOSTNAME (why web.yaml sets it)
+      # The first version of this step expected Kubernetes to replace the image's HOSTNAME with the pod's name; it
+      # doesn't on kind's containerd (the image's 0.0.0.0 reached the pod), so web.yaml's comment was corrected.
+      - name: the web pod listens on every interface (HOSTNAME from the image, and from web.yaml)
         run: |
           kubectl run hostname-probe --image=tally-web:1.0.0 --image-pull-policy=IfNotPresent --restart=Never \
             --command -- node -e 'console.log("HOSTNAME=" + process.env.HOSTNAME)'
           kubectl wait --for=jsonpath='{.status.phase}'=Succeeded pod/hostname-probe --timeout=120s
-          kubectl logs pod/hostname-probe | tee hostname.log
-          # Not `! grep`: bash -e doesn't stop on a negated command, so that line could never fail the step.
-          if grep -qx 'HOSTNAME=0.0.0.0' hostname.log; then echo "the image's HOSTNAME survived"; exit 1; fi
-          grep -q '^HOSTNAME=hostname-probe' hostname.log
-          kubectl exec deployment/tally-web -- node -e 'console.log("web HOSTNAME=" + process.env.HOSTNAME)'
+          kubectl logs pod/hostname-probe > hostname.log
+          cat hostname.log
+          grep -qx 'HOSTNAME=0.0.0.0' hostname.log
+          test "$(kubectl exec deployment/tally-web -- node -e 'process.stdout.write(String(process.env.HOSTNAME))')" = 0.0.0.0
+          kubectl delete pod hostname-probe
       - name: a rolling restart replaces the web pod without going unready
         run: |
           kubectl rollout restart deployment/tally-web
@@ -338,7 +340,8 @@ jobs:
       - name: diagnostics
         if: failure()
         run: |
-          kubectl get all,events --sort-by=.metadata.creationTimestamp || true
+          kubectl get all -o wide || true
+          kubectl get events --sort-by=.lastTimestamp || true
           kubectl describe pods || true
           kubectl logs deployment/tally-web --all-containers || true
           kubectl logs deployment/tally-worker || true
