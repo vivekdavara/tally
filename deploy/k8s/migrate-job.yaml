@@ -1,15 +1,19 @@
 # The release step: prisma migrate deploy as tally_owner, once per release, before web and worker change. The only
 # workload that gets the owner role's URL.
 #
-# One Job per release: its name carries the version, changed together with the image tag. A Job's pod template can't
+# One Job per release: its name carries the version, changed together with the image tags. A Job's pod template can't
 # be changed, so a fixed name would make the next release's apply fail (or, with the same tag, change nothing, and a
-# wait would return at once on the last release's finished Job: review round 4 of day 5). Finished Jobs are deleted
-# after a day.
+# wait would return at once on the last release's finished Job: review round 4 of day 5).
+# tests/unit/k8s-release.test.ts fails unless the name and all three tags match package.json's version (round 5).
+# Finished Jobs, failed ones included, are deleted after a day: read a failure's log before then.
 #
 # Two at once are safe (Prisma takes an advisory lock), so the retries are: a failure before a migration starts (the
 # database not reachable yet) is retried; a migration that fails partway is recorded as failed, and every later run
 # stops on it (Prisma's P3009) until someone resolves it, so a retry can't apply anything twice. No deadline: killing
-# a long migration partway would leave exactly that state.
+# a long migration partway would leave exactly that state. The cost (review round 5): a pod that never starts (a key
+# missing from the Secret, a wrong tag) leaves the Job pending with no limit, so wait with a timeout
+# (`kubectl wait --for=condition=complete job/tally-migrate-v1-0-0 --timeout=10m`) and, if it expires, delete the Job
+# before fixing the cause; otherwise the migration runs, unwatched, the moment the cause is fixed.
 apiVersion: batch/v1
 kind: Job
 metadata:

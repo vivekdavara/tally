@@ -9,8 +9,9 @@ metadata:
 spec:
   # One while BILLING_PROVIDER is mock; any number with stripe (the server keeps nothing else between requests).
   replicas: 1
-  # A rollout starts the new pod before stopping the old one, so for a moment two serve. With stripe that's harmless;
-  # with mock, a checkout session made in one pod isn't found in the other (use type: Recreate if that matters).
+  # A rollout starts the new pod before stopping the old one, so for a moment two serve. With stripe that's harmless.
+  # With mock, a checkout session made in one pod isn't found in the other; but mock sessions live in one process and
+  # any restart loses them anyway, so mock is for trying Tally, not for a deployment that rolls (review round 5).
   strategy:
     rollingUpdate: { maxUnavailable: 0, maxSurge: 1 }
   selector:

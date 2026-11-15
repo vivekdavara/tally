@@ -310,7 +310,9 @@ jobs:
         run: |
           kubectl apply -f deploy/k8s/config.yaml -f deploy/k8s/migrate-job.yaml
           kubectl wait --for=condition=complete job/tally-migrate-v1-0-0 --timeout=240s
-          kubectl logs job/tally-migrate-v1-0-0 > migrate.log
+          # The succeeded pod's log: `kubectl logs job/...` picks the oldest pod, which after a retry is the failed one.
+          pod=$(kubectl get pods -l batch.kubernetes.io/job-name=tally-migrate-v1-0-0 --field-selector=status.phase=Succeeded -o jsonpath='{.items[0].metadata.name}')
+          kubectl logs "pod/$pod" > migrate.log
           tail -n 3 migrate.log
           grep -q 'All migrations have been successfully applied' migrate.log
       - name: web and worker roll out (web ready means /api/health answered 200)
