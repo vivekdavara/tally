@@ -2,17 +2,23 @@
 // (`npm run build`'s output, what the container image runs) started BENCH_STARTS times; for each start, the time from
 // spawn to the first 200 from /api/health (which means the startup check passed: database reachable, role bound by
 // row-level security), then BENCH_REQUESTS sign-in page renders and the process's resident memory after them, then
-// the time from SIGTERM to exit and the exit code.
+// the time from SIGTERM to exit and the exit code. BENCH_SERVER=next-start measures `next start` from the full install
+// instead, on the same build, for comparison. Memory is that of the process listening on the port.
 //
 //   npm run build && node scripts/bench-startup.mjs
 //   BENCH_DATABASE_URL (default postgresql://tally_app@localhost:5432/tally_e2e: a migrated database), BENCH_PORT
-//   (8137), BENCH_STARTS (5), BENCH_REQUESTS (200)
+//   (8137), BENCH_STARTS (5), BENCH_REQUESTS (200), BENCH_SERVER (standalone | next-start)
 import { spawn, execFileSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { existsSync } from "node:fs";
 import { setTimeout as sleep } from "node:timers/promises";
 
 const server = ".next/standalone/server.js";
+const mode = process.env.BENCH_SERVER ?? "standalone";
+if (mode !== "standalone" && mode !== "next-start") {
+  console.error(`bench-startup: BENCH_SERVER must be standalone or next-start, not ${mode}`);
+  process.exit(2);
+}
 if (!existsSync(server)) {
   console.error(`bench-startup: ${server} is missing; run npm run build first`);
   process.exit(2);
@@ -32,10 +38,13 @@ const env = {
 
 /** Resident set size of a process, in MiB (ps reports KiB). */
 const rssMiB = (pid) => Number(execFileSync("ps", ["-o", "rss=", "-p", String(pid)], { encoding: "utf8" }).trim()) / 1024;
+/** The process listening on the port, which for next start need not be the one spawned. */
+const listener = () => Number(execFileSync("lsof", ["-nP", "-t", `-iTCP:${port}`, "-sTCP:LISTEN"], { encoding: "utf8" }).trim().split("\n")[0]);
+const command = mode === "standalone" ? [server] : ["node_modules/next/dist/bin/next", "start", "--port", String(port), "--hostname", "127.0.0.1"];
 
 async function once() {
   const started = performance.now();
-  const child = spawn(process.execPath, [server], { env, stdio: ["ignore", "ignore", "pipe"] });
+  const child = spawn(process.execPath, command, { env, stdio: ["ignore", "ignore", "pipe"] });
   let stderr = "";
   child.stderr.on("data", (d) => (stderr += d));
   const exited = new Promise((resolve) => child.on("exit", (code, signal) => resolve({ code, signal, at: performance.now() })));
@@ -56,17 +65,18 @@ async function once() {
     child.kill("SIGKILL");
     throw new Error(`the server never answered 200 on /api/health: ${stderr.trim()}`);
   }
-  const rssHealthy = rssMiB(child.pid);
+  const pid = listener();
+  const rssHealthy = rssMiB(pid);
   for (let i = 0; i < requests; i++) {
     const response = await fetch(`http://127.0.0.1:${port}/signin`);
     if (response.status !== 200) throw new Error(`/signin answered ${response.status}`);
     await response.arrayBuffer();
   }
-  const rssAfter = rssMiB(child.pid);
+  const rssAfter = rssMiB(pid);
   const stopAt = performance.now();
   child.kill("SIGTERM");
   const { code, signal, at } = await exited;
-  return { healthyMs: Math.round(healthyMs), rssHealthyMiB: Math.round(rssHealthy), rssAfterMiB: Math.round(rssAfter), stopMs: Math.round(at - stopAt), exitCode: code, signal };
+  return { healthyMs: Math.round(healthyMs), rssHealthyMiB: Math.round(rssHealthy), rssAfterMiB: Math.round(rssAfter), stopMs: Math.round(at - stopAt), exitCode: code, signal, listenerIsSpawned: pid === child.pid };
 }
 
 const runs = [];
@@ -76,6 +86,7 @@ console.log(
   JSON.stringify(
     {
       node: process.version,
+      server: mode,
       starts,
       requestsPerStart: requests,
       runs,

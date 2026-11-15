@@ -264,6 +264,10 @@ applications (nothing of this project running). Image numbers from CI (GitHub's 
   start): healthy (the first 200 from `/api/health`, so the startup check against the database had passed) in a
   median of **318 / 315 ms** (the first start of the first run 408 ms, the rest 315 to 325 ms); 141 MiB resident when
   healthy, 187 to 188 MiB after the 200 renders; SIGTERM to exit **4 to 5 ms**, exit 143.
+- **Standalone vs `next start`** on the same build (`BENCH_SERVER=standalone` and `next-start`, alternated: standalone,
+  next start, next start, standalone, 5 starts each, at `4e4ca22`; load average 6.1 to 7.6 with a review agent
+  running): healthy in a median of 330 / 320 ms vs 334 / 331 ms, about the same; 187 MiB resident after 200 renders vs
+  200 to 202 MiB. What the standalone output buys is size (61 MB against an 837 MB install), not start time.
 - **Two release steps at once:** two `prisma migrate deploy` started together against a fresh database: one applied
   all 14 migrations, the other waited on Prisma's advisory lock and found none pending; both exited 0, 14 rows in
   `_prisma_migrations`, none unfinished.
