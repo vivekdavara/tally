@@ -432,10 +432,12 @@ transaction ends. Cost: about 150 µs per page or action (`npm run bench:reminde
 
 **What stops an organization from losing its last owner?**
 A trigger, `memberships_guard`, for every writer. It takes an advisory lock per organization, so two owners demoting
-each other take turns, then locks the other owners' rows `FOR SHARE` and refuses if none is left. The review found the
-first version's gap: it read the other owners with a plain `SELECT`, and a raw-SQL writer under REPEATABLE READ (whose
-snapshot predates the other demotion) got a stale "yes": zero owners (`tests/review-d4/last-owner-repeatable-read.test.ts`).
-Locking makes that a serialization failure. Deleting a user or organization as an administrator cascades through
+each other take turns, then refuses if no other owner is left. How it looks depends on the isolation level: under READ
+COMMITTED a plain read after the lock sees every committed change; under REPEATABLE READ or SERIALIZABLE the snapshot
+is older, so it locks the other owners `FOR SHARE` (a stale row becomes a serialization failure). It took two review
+rounds: the first version read plainly at every level (a REPEATABLE READ writer got a stale "yes": zero owners,
+`tests/review-d4/`), and the fix locked at every level, which turned a clean refusal into a deadlock for a writer that
+locks its target first (`tests/review-d4r2/`). Deleting a user or organization as an administrator cascades through
 (`pg_trigger_depth() > 1`).
 
 **Why did changing roles deadlock, and how did you fix it?**

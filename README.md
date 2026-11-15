@@ -175,14 +175,15 @@ and everything else runs.
 Apple M3 laptop (macOS 26.6.2, Node 23.11, Postgres 14.20), on battery, load average 2.1 to 2.6, no review agent
 running during the benchmarks. Synthetic data.
 
-- **Tests:** 692 Vitest tests in 76 files (`npm run check`, 42.3 s, files one at a time), 152 of them new today; 24
+- **Tests:** 694 Vitest tests in 78 files (`npm run check`, 45.8 s, files one at a time), 154 of them new today; 24
   Playwright tests (`npm run e2e`, 18.7 s), 2 new. Among the new:
   - **Every Server Action as each role** (`tests/integration/roles.test.ts`, 64 cases): the effect, or the Forbidden
     message (or the owner-only message) and nothing changed; a test fails when an action has no case.
   - **The role re-check inside the transaction:** an admin demoted between the two checks can't finalize; a removed
     member gets the 404; a role change waits for an in-flight action (seen waiting in `pg_stat_activity`).
   - **The last owner** through the service, with two owners demoting each other (5 rounds), with raw SQL racing, and
-    under REPEATABLE READ.
+    under REPEATABLE READ; a writer that locks its target first gets the refusal, not a deadlock.
+  - **The worker** stops within seconds of a SIGTERM that arrives mid-job.
   - **Invitation links:** another account with the link, a second use, another organization's id with the real
     secret, revoked, expired (the trigger refuses it too), a newer link replacing the old, only a digest stored.
   - **Reminders:** stages and late runs, superseded lower stages, retries with backoff and giving up after 8, a claim
@@ -350,11 +351,24 @@ failing on the code it reviewed; all three reproduced here and were fixed in `ce
 
 - **Zero owners under REPEATABLE READ.** The last-owner trigger read "another owner left?" from the transaction's
   snapshot; a raw-SQL writer under REPEATABLE READ demoted the second owner after the first was demoted and committed.
-  The other owners' rows are now locked `FOR SHARE` (a serialization failure under the stricter levels).
+  The other owners' rows are now locked `FOR SHARE` under the stricter levels (a serialization failure); see round 2.
 - **The wrong day count in reminders:** "is now 14 days overdue" for an invoice 20 days past due. The claim now returns
   the real count.
 - **Two emails in one run:** a 1-day reminder queued by a run that stopped before sending went out with the 30-day
   one. A lower stage is now superseded by a higher one.
+
+A second agent at `1330120`, on round 1's fixes and the worker (8 minutes, ~129k tokens, `tests/review-d4r2/`), found
+two, both fixed in `f6702f5`:
+
+- **The worker ignored a stop that came during a job:** its sleep waited for the abort event, which had already fired,
+  so it slept out the hour (still running 15 s after SIGTERM). It now returns at once.
+- **Round 1's trigger fix could deadlock:** locking the other owners `FOR SHARE` at every level turned a clean
+  last-owner refusal into 40P01 for a raw-SQL writer that locks its target first. READ COMMITTED reads plainly again
+  (correct there); only the stricter levels lock. As on earlier projects, round 2 found its bugs in round 1's code.
+
+Its unproven suspicions, judged and left: a 30-day reminder that fails 8 times leaves the earlier stages skipped (they
+go to the same address); a higher stage queued between a claim's snapshot and its lock can let a lower one out (a
+narrow race); a worker whose lease lapsed can overwrite a newer claim's lease when it records (true before today too).
 
 Found by my own work: a member-management deadlock (40P01) between two admins changing each other (run's `FOR SHARE`
 on the actor, then `FOR UPDATE` on the target), fixed by taking the organization's advisory lock first; a reminder

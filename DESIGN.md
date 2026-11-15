@@ -276,11 +276,14 @@ members and create invitation links (`src/server/orgs/members.ts`, actions in `s
   transaction, and the target's role, locked `FOR UPDATE`.
 - **An organization always has an owner,** for every writer: `memberships_guard` refuses removing or demoting the last
   one (TL018). Two owners demoting each other at once would each see the other still an owner, so the trigger takes an
-  advisory lock per organization, held to the end of the transaction, and then locks the other owners' rows `FOR
-  SHARE`: under READ COMMITTED that reads their latest committed version; under REPEATABLE READ or SERIALIZABLE (a
-  raw-SQL writer picks its own level) a row changed since the snapshot is a serialization failure. The first version
-  read them with a plain `SELECT`, which a REPEATABLE READ writer answered from its old snapshot: zero owners (review
-  round 1, `tests/review-d4/last-owner-repeatable-read.test.ts`). Deleting a user or an organization (an
+  advisory lock per organization, held to the end of the transaction, then looks for another owner. Under READ
+  COMMITTED a plain read is right: each statement takes a fresh snapshot, so it sees every owner change committed before
+  the lock was granted. Under REPEATABLE READ or SERIALIZABLE (a raw-SQL writer picks its own level) the snapshot is
+  older, so the other owners' rows are locked `FOR SHARE`, and a row changed since the snapshot is a serialization
+  failure. The first version read them plainly at every level, which a REPEATABLE READ writer answered from its old
+  snapshot: zero owners (review round 1, `tests/review-d4/last-owner-repeatable-read.test.ts`); round 1's fix locked
+  them at every level, which turned a clean refusal into a deadlock for a writer that locks its target first (round 2,
+  `tests/review-d4r2/owner-guard-for-share-deadlocks.test.ts`). Deleting a user or an organization (an
   administrator, as the owner role) cascades here as a nested statement (`pg_trigger_depth() > 1`) and is let through.
 - **No deadlock between two managers.** `run` locks the actor's own row `FOR SHARE` and a role change locks the
   target's `FOR UPDATE`: two admins changing each other would each hold one and wait for the other (40P01, the first
