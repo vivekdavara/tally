@@ -27,7 +27,7 @@ The headline numbers, each from the day's section below, where the conditions an
 
 | What | Result | Command (day) |
 |---|---|---|
-| Tests | 710 Vitest tests in 80 files, 24 Playwright tests, all passing; the 24 also pass against the web container in CI | `npm run check`, `npm run e2e` (5) |
+| Tests | 714 Vitest tests in 82 files, 25 Playwright tests, all passing; the 25 also pass against the web container in CI | `npm run check`, `npm run e2e` (5) |
 | Cost of tenant isolation per request | p50 914 µs through `withTenant` vs 409 µs for one bare query: four extra round trips, not the policy | `npm run bench` (1) |
 | Sign-in timing | 49.6 ms at the median for a wrong password, an unknown email and the right password alike | `npm run bench:signin` (1) |
 | Gapless numbering under contention | 16 concurrent finalizers: p95 23.5 ms in one organization vs 8.3 ms spread over many | `npm run bench:finalize` (2) |
@@ -35,7 +35,7 @@ The headline numbers, each from the day's section below, where the conditions an
 | Overdue reminders | about 1,300 reminders/s with one worker, more with two | `npm run bench:reminders` (4) |
 | The role re-check inside the transaction | about 150 µs per page or action | `npm run bench:reminders` (4) |
 | Server start | healthy (startup check passed) in a median 318 / 315 ms; 187 MiB resident after 200 page renders; SIGTERM to exit 4 to 5 ms | `npm run bench:startup` (5) |
-| Images | web and worker 289 MB, migrate 943 MB (from 1.3 GB); web healthy about 7 s after `docker run`; `docker stop` under 0.1 s, handled | CI "container image" job (5) |
+| Images | web and worker 289 MB, migrate 780 MB (from 1.3 GB); web healthy about 7 s after `docker run`; `docker stop` under 0.1 s, handled | CI "container image" job (5) |
 | Review rounds | bugs proven per round: day 1: 9, 5; day 2: 4, 7, 3, 2; day 3: 2, 2, 2, 1, 3, 0; day 4: 3, 2; day 5: 0 (six suspicions, all fixed) | README "Review" |
 
 ## Reading order
@@ -144,6 +144,7 @@ scripts/worker.ts                the background worker: overdue reminders hourly
 scripts/bench-reminders.ts       the reminders job's throughput; what the role re-check costs
 scripts/build-worker.mjs         bundles the worker and reconcile commands into dist/ (esbuild), for the image
 scripts/bench-startup.mjs        the production server's time to healthy, memory and stop time
+scripts/start.mjs                npm start: the standalone server with the env files read as next start reads them
 Dockerfile, .dockerignore        the web, worker and migrate images
 CHANGELOG.md                     what 1.0.0 contains
 src/server/db/tenant.ts          withTenant
@@ -191,7 +192,8 @@ cron). It writes each email to stdout as a JSON line: Tally ships no email provi
 
 For production mode locally, `npm run build && AUTH_TRUST_HOST=true npm start` (Auth.js wants the trusted host stated
 outside development). The build is Next.js's standalone output, `.next/standalone/server.js` with only the packages it
-uses, which is also what the container image runs (see Deployment). The server checks at startup that its database role is bound by row-level security and exits
+uses, which is also what the container image runs (see Deployment); `npm start` (`scripts/start.mjs`) reads `.env` and
+the other env files the way `next start` does, then runs it. The server checks at startup that its database role is bound by row-level security and exits
 if it isn't, so a `DATABASE_URL` pointing at `tally_owner` or a superuser won't start.
 
 Checks:
@@ -239,19 +241,23 @@ migrations and as the owner role, runs the release step, waits for the web conta
 Apple M3 laptop (macOS 26.6.2, Node 23.11, Postgres 14.20), on battery, load average 3.4 to 3.9 from other
 applications (nothing of this project running). Image numbers from CI (GitHub's ubuntu-24.04 runners).
 
-- **Tests:** 710 Vitest tests in 80 files (`npm run check`, 51.9 s, files one at a time), 16 of them new today; 24
-  Playwright tests (`npm run e2e`, 20.5 s), now run against the standalone server. New: the worker bundle run from a
-  directory with no `node_modules` above it (a reminder sent, the owner role refused, a missing setting named, SIGTERM
-  while sleeping: exit 0 at once; all five fail when the bundle leaves its packages external); leaving an organization
-  (`tests/integration/leave.test.ts`: the 404 afterwards, the last owner refused, an owner leaving while another
-  demotes them, 5 rounds, without a deadlock; with `leave` taken out of `changesMemberships` it fails with 40P01; two
-  owners leaving at once leave one); the role matrix and the isolation suite cover the new action.
-- **The images** (CI, "container image" job at `2cc9225`): web and worker 289 MB each (they share every layer);
-  migrate 943 MB. The migrate image was 1.3 GB at `0637ec2`, built on the full install with TypeScript, ESLint,
-  Playwright and Vitest; it now has its own production-only install. In both runs (`0637ec2`, `2cc9225`) the web
-  container was healthy about 7 s after `docker run` (Docker's first health check), passed all 24 e2e tests (25.9 s,
-  39.8 s), and `docker stop` took 0.07 / 0.09 s for the web container (exit 143, Next.js's handler) and 0.06 / 0.07 s
-  for the worker (exit 0): handled, not killed after 10 s. No `.env` file in the images.
+- **Tests:** 714 Vitest tests in 82 files (`npm run check`, 52.9 s, files one at a time), 20 of them new today; 25
+  Playwright tests (`npm run e2e`, 21.9 s), 1 new, now run against the standalone server. New: the worker bundle run
+  from a directory with no `node_modules` above it (a reminder sent, the owner role refused, a missing setting named,
+  SIGTERM while sleeping: exit 0 at once; all five fail when the bundle leaves its packages external); leaving an
+  organization (`tests/integration/leave.test.ts`: the 404 afterwards, the last owner refused, an owner leaving while
+  another demotes them, 5 rounds, without a deadlock; with `leave` taken out of `changesMemberships` it fails with
+  40P01; two owners leaving at once leave one); the role matrix and the isolation suite cover the new action; `npm
+  start`'s env files (`tests/unit/start-env.test.ts`); the CI worker step's own lines (`tests/review-d5r2/`); e2e: a
+  member leaves in a second browser and gets a 404 afterwards, the only owner is refused.
+- **The images** (CI, "container image" job, `docker image ls`): web and worker 289 MB each (they share every
+  layer). The migrate image, one optimization at a time: **1.3 GB** at `0637ec2` (built on the full install, with
+  TypeScript, ESLint, Playwright and Vitest), **943 MB** at `2cc9225` (its own `npm ci --omit=dev`), **780 MB** at
+  `d2068d0` (`--omit=optional` too: no Next.js compiler binary or image library); every run applied the 14 migrations
+  from it. In each of the runs at `0637ec2`, `2cc9225` and `d2068d0` the web container was healthy about 7 s after
+  `docker run` (Docker's first health check), passed every e2e test against it (24 in 25.9 s, 24 in 39.8 s, 25 in
+  39.2 s), and `docker stop` took 0.06 to 0.09 s for the web container (exit 143, Next.js's handler) and 0.05 to 0.07 s
+  for the worker (exit 0): handled, not killed after 10 s. No `.env` file in any image.
 - **The artifacts:** `.next/standalone` is 61 MB, of which 55 MB `node_modules`, against 837 MB for the full install
   (`du -sh`); the worker and reconcile bundles are 6.1 MB each (`ls -l dist`).
 - **Server start** (`npm run bench:startup` at `a1272a5`, run twice, 5 starts each, 200 sign-in page renders per
@@ -445,8 +451,8 @@ leaving against invitations, removals and the last-owner trigger. Its six suspic
 
 - **`npm start` read a copy of `.env` taken at build time.** `next build` copies `.env` into `.next/standalone`
   (`cmp` showed it, `AUTH_SECRET` included), and the standalone server loads it from there, so an edited `.env` was
-  ignored until the next build. The build now deletes the copies and `npm start` passes the project's `.env` with
-  `node --env-file-if-exists`.
+  ignored until the next build. The build now deletes the copies and `npm start` reads the project's env files (first
+  with `node --env-file-if-exists=.env`, which round 2 showed wasn't enough).
 - **`.dockerignore` matched `.env` at the root only;** `**/.env*` catches one anywhere, and CI looks in all three
   images.
 - **The health check called port 8117 whatever `PORT` said;** it follows `PORT` now, and CI checks a container on 8119.
@@ -454,11 +460,29 @@ leaving against invitations, removals and the last-owner trigger. Its six suspic
 - **`npm start` didn't set `HOSTNAME`,** which the standalone server binds to when it is exported; it sets `0.0.0.0`.
 - **CI's worker pass checked only the exit code;** it now requires the job's and the stop's log lines.
 
+A second agent at `a1272a5`, on round 1's fixes (5 minutes, `tests/review-d5r2/`), proved two bugs, both in round 1's
+CI changes, and one difference in how `npm start` reads env files; all fixed in `37544fa`:
+
+- **The worker pass's CI step passed when the pass failed.** Round 1 piped it into `tee`; GitHub's default `bash -e`
+  has no pipefail, so the step took `tee`'s 0, and the greps matched a failed pass's log lines too. The reviewer's
+  test runs the step's own lines under `bash -e` with the real worker and a revoked grant (its setup adapted after
+  the fix, marked). The step now writes to a file, and a failed pass fails it.
+- **The `PORT` health check couldn't fail:** the main web container was already listening on 8117 on the host
+  network, so a health check stuck on 8117 reached it and passed. It now runs before that container, checks nothing
+  answers on 8117, and calls 8119 itself.
+- **`npm start` read env files unlike `next start`:** `--env-file-if-exists=.env` skips `.env.local` and
+  `.env.production` and doesn't expand `$VARIABLE`. `scripts/start.mjs` now loads them with Next.js's own loader
+  (`@next/env`) and then runs the standalone server; `tests/unit/start-env.test.ts` checks the order, the expansion,
+  the shell's variables winning and the `PORT` default, and by hand a `.env` that builds `DATABASE_URL` from another
+  variable served `/api/health` through the real server. Round 2 again found its bugs in round 1's fixes.
+
 Checked and found by my own work: the e2e suite had only ever run against a standalone server inside the
 repository, where Node can fall back to the project's own `node_modules`; copied outside it, it still passed all 24,
 which is what the image relies on. The image job's first run failed on my own check (`find /` as the unprivileged user exits non-zero under
 `bash -e`), not on the images. A lock file regenerated with this Mac's npm 10.9.2 dropped the `libc` markers of
-unrelated packages; the change was redone with npm 11.21.1, which made the lock file.
+unrelated packages; the change was redone with npm 11.21.1, which made the lock file. My leave e2e test expected
+`/o` after leaving, but `/o` sends someone with one organization straight to it; it passed here by catching `/o`
+before the redirect and failed in CI's slower run.
 
 ### Day 4
 
@@ -676,7 +700,7 @@ finding as a failing test (`tests/review/`).
   or keeps messages in memory (tests). A real provider plugs in behind `Mailer`.
 - **The mock payment provider is per process** (its checkout sessions live in memory), so more than one web replica
   needs Stripe mode.
-- **The migrate image is 943 MB,** mostly Next.js and React it never runs; a manifest of its own would cut it.
+- **The migrate image is 780 MB,** much of it Next.js and React, which it never runs; a manifest of its own would cut it.
 - Organizations can't be renamed or deleted from the app, and an issued invoice's letterhead shows the organization's
   current name (only the bill-to is snapshotted; nothing can rename one yet).
 - An invoice paid between a reminder's claim and its send still gets that reminder.

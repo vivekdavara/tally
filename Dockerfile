@@ -52,8 +52,9 @@ WORKDIR /app
 ENV NODE_ENV=production NEXT_TELEMETRY_DISABLED=1
 COPY --from=build /app/.next/standalone ./
 COPY --from=build /app/dist/worker.mjs /app/dist/reconcile.mjs ./dist/
-# Read-only for the process: it runs as `node` (uid 1000) and the files stay root's, except Next.js's cache
-# directory, where it may write rendered pages and fetch results.
+# Read-only for the process: it runs as `node` (uid 1000) and the files stay root's, except .next/cache, where
+# Next.js keeps its fetch and image caches. (Pages it re-renders would go under .next/server, which stays read-only:
+# every page here is dynamic except / and the 404, so nothing is re-rendered to disk.)
 RUN mkdir -p .next/cache && chown node:node .next/cache
 USER node
 

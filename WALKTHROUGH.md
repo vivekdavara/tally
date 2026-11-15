@@ -574,8 +574,8 @@ another owner demotes them deadlocks (40P01): `tests/integration/leave.test.ts` 
 - Rate-limit sign-in, and email verification to stop sign-up from revealing accounts.
 - A real email provider behind `Mailer` (one that honours idempotency keys), and invitation emails.
 - Deploy it for real: TLS, a managed Postgres with passwords and `sslmode=require`, backups, and the add-then-remove
-  rule for migrations exercised by an actual rolling deploy. Give the migrate image a manifest of its own (943 MB
-  today, mostly Next.js it doesn't use).
+  rule for migrations exercised by an actual rolling deploy. Give the migrate image a manifest of its own (780 MB
+  today, much of it Next.js, which it doesn't use).
 - Refunds and partial payments: new payment and invoice states (PAID can't change today), a refund action for
   `refund_due` payments.
 - Process webhooks from a queue: answer 200 as soon as the event is stored, apply it in a worker, as Stripe

@@ -698,10 +698,11 @@ flowchart LR
   into the image layer. CI checks the built image has no `.env*` file outside `node_modules`.
 - The base image is `node:24.22.2-bookworm-slim`, pinned by digest. The install stages add OpenSSL, which Prisma's
   migration engine needs; the runtime stage doesn't.
-- **Sizes** (CI, `docker image ls`): web and worker 289 MB each (they share every layer), migrate 943 MB. The migrate
-  image started at 1.3 GB, built on the full install with the compilers and test tools; it now runs its own
-  `npm ci --omit=dev`, which is why Prisma's CLI moved to `dependencies`. It still carries Next.js and React, which
-  only the build needs; a manifest of its own would cut that, at the cost of a second lock file to keep in step.
+- **Sizes** (CI, `docker image ls`): web and worker 289 MB each (they share every layer), migrate 780 MB. The migrate
+  image started at 1.3 GB, built on the full install with the compilers and test tools; its own `npm ci --omit=dev`
+  (which is why Prisma's CLI moved to `dependencies`) made it 943 MB, and `--omit=optional` (Next.js's compiler
+  binary, sharp's image library) 780 MB. It still carries Next.js and React, which only the build needs; a manifest of
+  its own would cut that, at the cost of a second lock file to keep in step.
 - `HOSTNAME=0.0.0.0`: the standalone server binds to `$HOSTNAME`, and Docker sets that to the container's id, which
   resolves to the container's own address only, not loopback, so the health check on 127.0.0.1 would fail.
 
