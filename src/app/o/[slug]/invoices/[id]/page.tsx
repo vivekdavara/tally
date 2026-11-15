@@ -200,7 +200,9 @@ export default async function InvoicePage({ params }: { params: Promise<{ slug: 
                   <td>
                     {r.sentAt
                       ? `Sent ${formatDate(r.sentAt)}`
-                      : r.attempts === 0
+                      : reminders.some((later) => later.stage > r.stage)
+                        ? "Skipped: a later reminder replaced it"
+                        : r.attempts === 0
                         ? "Queued"
                         : `Not sent yet (${r.attempts} ${r.attempts === 1 ? "attempt" : "attempts"}${r.lastError ? `: ${r.lastError}` : ""})`}
                   </td>

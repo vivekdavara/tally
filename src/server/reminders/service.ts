@@ -47,6 +47,8 @@ export interface ClaimedReminder {
   totalMinor: bigint;
   currency: string;
   dueOn: Date;
+  /** Days past due when claimed: at least the stage, more after a late run or retries (review of day 4). */
+  daysOverdue: number;
   customerName: string;
   organizationName: string;
   /** A live payment link for the invoice, if there is one. */
@@ -68,6 +70,10 @@ export async function claimReminders(tx: TenantTx, limit = 50): Promise<ClaimedR
          JOIN invoices i ON i.organization_id = r2.organization_id AND i.id = r2.invoice_id
         WHERE r2.organization_id = ${TENANT} AND r2.sent_at IS NULL AND r2.attempts < ${MAX_ATTEMPTS}
           AND r2.next_attempt_at <= clock_timestamp() AND i.status = 'OPEN'
+          -- Superseded: a later stage was queued (review of day 4: an unsent 1-day reminder from a run that stopped
+          -- went out together with the 30-day one). It stays unsent; the invoice page says it was skipped.
+          AND NOT EXISTS (SELECT 1 FROM reminders r3
+                           WHERE r3.organization_id = r2.organization_id AND r3.invoice_id = r2.invoice_id AND r3.stage > r2.stage)
         ORDER BY r2.next_attempt_at, r2.id
         LIMIT $1
           FOR UPDATE OF r2 SKIP LOCKED
@@ -80,6 +86,7 @@ export async function claimReminders(tx: TenantTx, limit = 50): Promise<ClaimedR
      )
      SELECT c.id, c.invoice_id AS "invoiceId", c.stage::int AS stage, c.recipient, c.attempts,
             i.number AS "invoiceNumber", i.total_minor AS "totalMinor", i.currency, i.due_on AS "dueOn",
+            ((clock_timestamp() AT TIME ZONE 'UTC')::date - i.due_on) AS "daysOverdue",
             i.bill_to_name AS "customerName", o.name AS "organizationName",
             (SELECT p.checkout_url FROM payments p
               WHERE p.organization_id = i.organization_id AND p.invoice_id = i.id AND p.status = 'PENDING'
@@ -119,7 +126,9 @@ export async function markFailed(tx: TenantTx, id: string, attempts: number, err
 export function reminderMessage(r: ClaimedReminder, appBaseUrl: string): MailMessage {
   const total = isCurrency(r.currency) ? formatMoney(BigInt(r.totalMinor), r.currency) : `${r.totalMinor} ${r.currency}`;
   const label = invoiceLabel(r.invoiceNumber);
-  const days = r.stage === 1 ? "1 day" : `${r.stage} days`;
+  // The real count, not the stage: a late run sends the 14-day reminder for an invoice 20 days past due (review of
+  // day 4: the first version said "14 days overdue").
+  const days = r.daysOverdue === 1 ? "1 day" : `${r.daysOverdue} days`;
   const url = r.checkoutUrl ? (r.checkoutUrl.startsWith("/") ? `${appBaseUrl}${r.checkoutUrl}` : r.checkoutUrl) : null;
   const lines = [
     `Hello ${r.customerName},`,
