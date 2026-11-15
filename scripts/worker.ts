@@ -59,11 +59,23 @@ function log(entry: Record<string, unknown>) {
   process.stdout.write(`${JSON.stringify({ at: new Date().toISOString(), ...entry })}\n`);
 }
 
-/** Resolves after `ms`, or at once when the worker is told to stop. */
+/**
+ * Resolves after `ms`, or at once when the worker is told to stop, including when it already was: the abort event
+ * fires once, so a listener added after a stop that came during a job never ran, and the worker slept out the whole
+ * interval (review round 2 of day 4). The listener is removed when the timer wins, so sleeps don't pile them up.
+ */
 function sleep(ms: number): Promise<void> {
+  if (stop.signal.aborted) return Promise.resolve();
   return new Promise((resolve) => {
-    const timer = setTimeout(resolve, ms);
-    stop.signal.addEventListener("abort", () => (clearTimeout(timer), resolve()), { once: true });
+    const wake = () => {
+      clearTimeout(timer);
+      resolve();
+    };
+    const timer = setTimeout(() => {
+      stop.signal.removeEventListener("abort", wake);
+      resolve();
+    }, ms);
+    stop.signal.addEventListener("abort", wake, { once: true });
   });
 }
 
@@ -76,7 +88,8 @@ let failed = false;
 async function reminders() {
   const report = await runReminderJob({ forEachOrganization: (fn) => forEachOrganization(fn, db), mailer, appBaseUrl: config.appBaseUrl, signal: stop.signal });
   log({ job: "reminders", ...report });
-  if (report.errors.length > 0) failed = true;
+  // A failed send is retried on a later run, but for --once (cron) it is still a failure to report.
+  if (report.errors.length > 0 || report.failed > 0) failed = true;
 }
 
 async function reconcile() {
