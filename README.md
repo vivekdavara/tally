@@ -8,11 +8,14 @@ another's data, even when the application code has a bug.
 Next.js 16 (App Router, Server Components, Server Actions), Prisma 7 with the `pg` driver adapter, PostgreSQL 14
 row-level security, Auth.js v5, Zod, Vitest, Playwright, TypeScript.
 
-**Status: day 3 of 5.** Day 1: design, scaffold, schema and migrations with row-level security, database roles,
+**Status: day 4 of 5.** Day 1: design, scaffold, schema and migrations with row-level security, database roles,
 sign-up and sign-in, tests and CI. Day 2: customers; invoices with line items, totals and per-rate taxes in exact
 integer arithmetic; gapless per-organization numbering and the invoice life cycle enforced by the database; invoice
 PDFs. Day 3: billing: payment links for open invoices through a provider interface (a Stripe-like mock by default,
-Stripe's test mode opt-in), signed webhooks processed exactly once, the payment life cycle enforced by the database. [DESIGN.md](DESIGN.md) is the specification;
+Stripe's test mode opt-in), signed webhooks processed exactly once, the payment life cycle enforced by the database.
+Day 4: roles enforced on every page and action (and checked again inside the transaction); members and invitation
+links, with the last owner kept by the database; a background worker that sends overdue reminders exactly once per
+stage; a tenant-isolation suite across every route and Server Action. [DESIGN.md](DESIGN.md) is the specification;
 [WALKTHROUGH.md](WALKTHROUGH.md) answers the questions an interviewer is likely to ask.
 
 ## Why
@@ -60,6 +63,19 @@ Billing (day 3) adds a third: **money moves once, and is never lost.**
   counts; money for an invoice that's already paid or void, or for the wrong amount, is kept with a "refund due" flag
   instead of paying anything. A trigger enforces the life cycle and freezes what a payment is for.
 
+Day 4 makes the **who** as strict as the **which tenant**:
+
+- **Every page and Server Action names the permission it needs** (`requireTenant(slug, "finalize")`), checked from the
+  roles table before any tenant data is read and again as the first statement of the transaction, with the member's
+  row locked: a member demoted mid-request is refused, and a role change waits for their in-flight action.
+- **An organization always has an owner**, enforced by a trigger for every writer and isolation level, and only an
+  owner makes, changes or removes one. **Invitation links** are single-use, seven days, for the invited address only,
+  stored as digests and looked up under the organization the link names.
+- **Overdue reminders go out once per stage** (1, 7, 14, 30 days), from a worker that claims with a lease and `SKIP
+  LOCKED`, sends between two transactions with an idempotency key, retries with backoff, and is safe to run twice.
+- **A suite calls every route and action as another organization's owner** and checks for the 404, the refusal, no
+  leaked text and no changed row; a new route without a probe fails it.
+
 ## Architecture
 
 ```mermaid
@@ -67,7 +83,7 @@ flowchart LR
     B[Browser] --> P["Page / Server Action<br/>(Next.js, Node runtime)"]
     P --> A["Auth.js<br/>JWT cookie: user id only"]
     P --> D["requireMembership(slug)<br/>404 unless a member"]
-    D --> T["withTenant(orgId, fn)<br/>one transaction"]
+    D --> T["withTenant(orgId, fn)<br/>one transaction;<br/>role re-checked FOR SHARE"]
     T -->|"set_config('app.organization_id', orgId, true)"| PG[("PostgreSQL 14<br/>RLS forced on customers, invoices,<br/>invoice_lines, invoice_counters,<br/>payments, stripe_events;<br/>life-cycle triggers")]
     T -->|"as tally_app"| PG
     M["prisma migrate deploy"] -->|"as tally_owner"| PG
@@ -75,6 +91,8 @@ flowchart LR
     P -->|"create checkout session<br/>(between two transactions)"| X["Stripe test mode<br/>or the mock"]
     X -->|"signed webhook"| W["/api/stripe/webhook<br/>verify, then runForStripeEvent"]
     W --> T
+    K["npm run worker<br/>reminders hourly"] -->|"forEachOrganization:<br/>one transaction per step"| PG
+    K -->|"send between two transactions"| MAIL["mailer<br/>(stdout JSON lines)"]
 ```
 
 ## Layout
@@ -91,10 +109,15 @@ scripts/bench-webhook.ts         what the webhook path costs: fresh events and r
 scripts/sample-pdf.ts            sample invoice PDFs (synthetic) for looking at the layout
 scripts/stripe-smoke.ts          checks the Stripe client against Stripe's test mode (needs your key)
 scripts/reconcile.ts             replays Stripe's events of the last N hours (lost webhook deliveries)
+scripts/worker.ts                the background worker: overdue reminders hourly (+ reconciliation in Stripe mode)
+scripts/bench-reminders.ts       the reminders job's throughput; what the role re-check costs
 src/server/db/tenant.ts          withTenant
 src/server/db/role-check.ts      assertSafeAppRole: is RLS binding this connection?
 src/server/auth/                 passwords (scrypt), Zod schemas, credentials, sign-up
-src/server/dal.ts                requireUser, requireMembership, requireTenant
+src/server/dal.ts                requireUser, requireMembership, requireTenant(slug, permission), runForInvitation
+src/server/orgs/                 the roles table (permissions.ts), members and invitations (members.ts)
+src/server/reminders/            overdue reminders: queue, claim, record (service.ts) and the job (job.ts)
+src/server/mail/                 the mailer interface
 src/server/invoices/money.ts     exact arithmetic: parsing, rounding, totals, formatting
 src/server/invoices/service.ts   customers, drafts, lines, finalize, paid, void (inside a tenant transaction)
 src/server/invoices/pdf.ts       the PDF writer
@@ -102,7 +125,7 @@ src/server/billing/              provider interface, mock + Stripe clients, limi
                                  payment links and event processing (service.ts), the webhook handler
 src/auth.ts                      Auth.js configuration
 src/app/                         pages, Server Actions, /api/auth, /api/health, /o/[slug]/invoices/[id]/pdf,
-                                 /api/stripe/webhook, /mock-checkout/[id], /paid
+                                 /o/[slug]/members, /invite/[token], /api/stripe/webhook, /mock-checkout/[id], /paid
 tests/unit, tests/integration    Vitest (integration tests against real Postgres)
 e2e/                             Playwright
 ```
@@ -127,6 +150,10 @@ and watch the webhook's answers. To use Stripe's test mode with your own keys, s
 localhost:8117/api/stripe/webhook`); `npx tsx scripts/stripe-smoke.ts` checks the client against Stripe first. A live
 key is refused at startup.
 
+Overdue reminders come from the worker, a separate process: `npm run worker` runs the job every hour
+(`REMINDER_INTERVAL_MINUTES`) until stopped, `npm run worker -- --once` runs one pass (exit 1 if anything failed, for
+cron). It writes each email to stdout as a JSON line: Tally ships no email provider. Several workers can run at once.
+
 For production mode locally, `npm run build && AUTH_TRUST_HOST=true npm start` (Auth.js wants the trusted host stated
 outside development). The server checks at startup that its database role is bound by row-level security and exits
 if it isn't, so a `DATABASE_URL` pointing at `tally_owner` or a superuser won't start.
@@ -136,12 +163,54 @@ Checks:
 ```bash
 npm run check                       # typecheck, lint, unit + integration tests (needs Postgres)
 npm run build && npm run e2e        # Playwright against next start on :8117, database tally_e2e
-scripts/db-setup.sh tally_bench && npm run bench && npm run bench:signin && npm run bench:finalize && npm run bench:webhook
+scripts/db-setup.sh tally_bench && npm run bench && npm run bench:signin && npm run bench:finalize && npm run bench:webhook && npm run bench:reminders
 npx tsx scripts/sample-pdf.ts .scratch/pdf   # writes sample PDFs (synthetic invoices)
 ```
 
 On Node 23 (this Mac's), Prisma's preinstall refuses to run; `npm ci --ignore-scripts && npx prisma generate` works,
 and everything else runs.
+
+## Results (day 4)
+
+Apple M3 laptop (macOS 26.6.2, Node 23.11, Postgres 14.20), on battery, load average 2.1 to 2.6, no review agent
+running during the benchmarks. Synthetic data.
+
+- **Tests:** 692 Vitest tests in 76 files (`npm run check`, 42.3 s, files one at a time), 152 of them new today; 24
+  Playwright tests (`npm run e2e`, 18.7 s), 2 new. Among the new:
+  - **Every Server Action as each role** (`tests/integration/roles.test.ts`, 64 cases): the effect, or the Forbidden
+    message (or the owner-only message) and nothing changed; a test fails when an action has no case.
+  - **The role re-check inside the transaction:** an admin demoted between the two checks can't finalize; a removed
+    member gets the 404; a role change waits for an in-flight action (seen waiting in `pg_stat_activity`).
+  - **The last owner** through the service, with two owners demoting each other (5 rounds), with raw SQL racing, and
+    under REPEATABLE READ.
+  - **Invitation links:** another account with the link, a second use, another organization's id with the real
+    secret, revoked, expired (the trigger refuses it too), a newer link replacing the old, only a digest stored.
+  - **Reminders:** stages and late runs, superseded lower stages, retries with backoff and giving up after 8, a claim
+    that lapses after a crash (same idempotency key), two workers sending 12 reminders exactly once, a claim not
+    waiting for another's open claim, one organization's failure not stopping the others, the trigger's rules for raw
+    SQL.
+  - **The isolation suite** (`tests/integration/isolation.test.ts`, 37 tests): 17 routes and 25 Server Actions, each
+    with a probe or a stated reason; mutation-checked (see DESIGN.md, "The isolation suite").
+  - **e2e:** an invitation accepted in a second browser (a third, signed in as someone else, gets nothing), a member
+    without Finalize until the owner makes them an admin, the only owner refused stepping down; an invoice moved 7
+    days past due, `npm run worker -- --once` printing one reminder for it (and none on a second pass), the invoice
+    page showing it sent.
+- **What the reminders job costs** (`npm run bench:reminders` at `d8d496b`, run twice: 4,000 open invoices 7 to 13
+  days past due over 16 organizations, queued and sent with an in-memory mailer in batches of 50; the script checks
+  every reminder was sent once and recorded; 0 to 1 ms of sleep in each case):
+
+  | Workers | Run 1 | Run 2 |
+  |---|---|---|
+  | 1 | 4,000 in 3,065 ms = 1,305/s | 4,000 in 3,093 ms = 1,293/s |
+  | 2 | 4,000 in 2,224 ms = 1,798/s | 4,000 in 1,570 ms = 2,549/s |
+
+  One worker is about 0.77 ms per reminder: a claim per batch, then one transaction per reminder to record it. The
+  two-worker runs disagree (1,798 vs 2,549/s) and I haven't found why; both show a second worker adding throughput
+  rather than waiting, which is what SKIP LOCKED is for. With a real mailer the send (a network call) would dominate.
+- **What the role re-check costs** (same runs; 3,000 transactions each, interleaved, as `tally_app`): the same small
+  tenant transaction (the tenant setting, a count of customers) without and with the `FOR SHARE` read of the member's
+  role: p50 304 / 305 µs without, 453 / 455 µs with; p95 339 / 366 vs 503 / 527 µs. **About 150 µs per page or
+  action**, one more round trip.
 
 ## Results (day 3)
 
@@ -272,6 +341,27 @@ All measured on an Apple M3 laptop (macOS 26.6.2, Node 23.11, Postgres 14.20), o
   49.7 ms for a wrong password: a timing oracle for which emails are registered.
 
 ## Review
+
+### Day 4
+
+One review agent at `8723642` (roles, members and invitations, reminders), in its own worktree and database. The
+account's usage limit stopped it at about 11:35 before it reported, but its three test files were complete, each
+failing on the code it reviewed; all three reproduced here and were fixed in `ce14583` (`tests/review-d4/`):
+
+- **Zero owners under REPEATABLE READ.** The last-owner trigger read "another owner left?" from the transaction's
+  snapshot; a raw-SQL writer under REPEATABLE READ demoted the second owner after the first was demoted and committed.
+  The other owners' rows are now locked `FOR SHARE` (a serialization failure under the stricter levels).
+- **The wrong day count in reminders:** "is now 14 days overdue" for an invoice 20 days past due. The claim now returns
+  the real count.
+- **Two emails in one run:** a 1-day reminder queued by a run that stopped before sending went out with the 30-day
+  one. A lower stage is now superseded by a higher one.
+
+Found by my own work: a member-management deadlock (40P01) between two admins changing each other (run's `FOR SHARE`
+on the actor, then `FOR UPDATE` on the target), fixed by taking the organization's advisory lock first; a reminder
+claim that took every due reminder instead of one batch (the planner re-ran the `LIMIT ... SKIP LOCKED` subquery per
+outer row), found by a test that holds one claim open; a membership lookup that ignores the user survived the first
+isolation suite (the page bodies still 404 through the re-check), so the suite now probes page titles too; and a
+flaky assertion of mine ("both workers sent something") that depended on scheduling.
 
 ### Day 3
 
@@ -436,6 +526,22 @@ finding as a failing test (`tests/review/`).
 - **Money is never thrown away:** statuses only move forward, late successes count, and money nobody wants is flagged
   for a refund rather than paying the wrong thing.
 
+## Limitations (day 4)
+
+- **No email is sent.** Invitation links are shown to the inviter to pass on; reminders go to a mailer interface whose
+  only implementations print (the worker) or keep messages in memory (tests). A real provider plugs in behind
+  `Mailer`; reminders are at least once without one that honours the idempotency key.
+- An invoice paid between a reminder's claim and its send still gets that reminder (a window of one send).
+- Sign-up always creates an organization, so an invited person signs up with one of their own before accepting; signing
+  in from an invitation link lands on `/o`, not back on the link.
+- An admin can remove or demote another admin, and anyone with `manage-members` can remove themselves (the last owner
+  excepted); members can't leave on their own (an owner or admin removes them).
+- Organizations can't be renamed or deleted from the app (no route; the app role has no grant), and an issued invoice's
+  letterhead shows the organization's current name (it isn't snapshotted like the bill-to).
+- The role re-check costs about 150 µs per page or action ("Results (day 4)"); the time between `requireTenant`'s two
+  checks is a page's own work, so the second one is what guarantees the write.
+- Rate limiting sign-in is still not done.
+
 ## Limitations (day 3)
 
 - **Stripe itself is only partly checked.** On 2026-11-13 Vivek ran `scripts/stripe-smoke.ts` with his test key
@@ -446,8 +552,8 @@ finding as a failing test (`tests/review/`).
   local stand-in for api.stripe.com and the mock. The tests and CI never use a key.
 - No refunds or partial payments: PAID is final, and money that arrives for an invoice that doesn't want it is only
   flagged (`refund_due`, a "Refund due" badge); refunding it is done by hand in Stripe's dashboard.
-- Reconciliation (`npm run reconcile -- <hours>`) is a script to run by hand or from cron; nothing schedules it yet
-  (day 4 adds a background job). It recovers events lost to an outage longer than Stripe's retries (three days live,
+- Reconciliation (`npm run reconcile -- <hours>`) is a script to run by hand or from cron (day 4: `npm run worker`
+  also runs it every 15 minutes in Stripe mode). It recovers events lost to an outage longer than Stripe's retries (three days live,
   a few hours in test mode), within Stripe's 30 days of event retention, and it is also the backstop for after-effects
   that keep failing. Its Stripe side is tested only against the local stand-in.
 - An expiry the provider refuses outright (a 4xx, e.g. a rotated key) is logged, not retried; a link it leaves payable
@@ -462,7 +568,7 @@ finding as a failing test (`tests/review/`).
   by Tally's clock). In mock mode anyone holding a payment link can "pay" it, which is what a mock is for; a
   deployment sets `BILLING_PROVIDER=stripe`.
 - KWD invoices can't be paid by card (Stripe's three-decimal rules unconfirmed).
-- Roles and the full isolation suite are day 4: today any member can create payment links, mark paid or void.
+- Roles and the full isolation suite were day 4 (on day 3 any member could create payment links, mark paid or void).
 
 ## Limitations (day 2)
 
