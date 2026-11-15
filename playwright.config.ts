@@ -7,6 +7,9 @@ import { defineConfig } from "@playwright/test";
 // Made once in the runner; its workers load this file again and inherit the variables.
 process.env.E2E_DATABASE_URL ??= "postgresql://tally_app@localhost:5432/tally_e2e";
 process.env.E2E_MIGRATE_DATABASE_URL ??= "postgresql://tally_owner@localhost:5432/tally_e2e";
+// A superuser on the e2e database, for the one thing a test can't do through the app: let time pass (an invoice's
+// due date moved back, e2e/reminders.spec.ts). Locally this machine's user; CI sets postgres.
+process.env.E2E_ADMIN_DATABASE_URL ??= "postgresql://localhost:5432/tally_e2e";
 process.env.E2E_AUTH_SECRET ??= randomBytes(32).toString("base64");
 // The webhook signing secret the server verifies with (billing runs on the mock provider): known to the tests so
 // they can sign events and post them to /api/stripe/webhook over HTTP.
