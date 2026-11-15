@@ -1,0 +1,76 @@
+# The web server. Readiness is /api/health (the database answers and the role is bound by row-level security), so a
+# replica without its database leaves the Service; liveness is only the TCP port, so a database outage doesn't
+# restart every replica (DESIGN.md, "Health, stops and scaling"). On SIGTERM the server stops accepting, finishes what
+# is in flight and exits, well inside the grace period.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: tally-web
+spec:
+  # One while BILLING_PROVIDER is mock; any number with stripe (the server keeps nothing else between requests).
+  replicas: 1
+  strategy:
+    rollingUpdate: { maxUnavailable: 0, maxSurge: 1 }
+  selector:
+    matchLabels: { app.kubernetes.io/name: tally, app.kubernetes.io/component: web }
+  template:
+    metadata:
+      labels: { app.kubernetes.io/name: tally, app.kubernetes.io/component: web }
+    spec:
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: web
+          image: tally-web:1.0.0
+          imagePullPolicy: IfNotPresent
+          ports:
+            - { name: http, containerPort: 8117 }
+          envFrom:
+            - configMapRef: { name: tally-config }
+          env:
+            # Kubernetes sets HOSTNAME to the pod's name, which the standalone server would bind to (the pod's address
+            # only, not loopback); the image's own HOSTNAME=0.0.0.0 doesn't survive that, so it's set here.
+            - { name: HOSTNAME, value: 0.0.0.0 }
+            - name: DATABASE_URL
+              valueFrom: { secretKeyRef: { name: tally-secrets, key: database-url } }
+            - name: AUTH_SECRET
+              valueFrom: { secretKeyRef: { name: tally-secrets, key: auth-secret } }
+            - name: STRIPE_SECRET_KEY
+              valueFrom: { secretKeyRef: { name: tally-secrets, key: stripe-secret-key, optional: true } }
+            - name: STRIPE_WEBHOOK_SECRET
+              valueFrom: { secretKeyRef: { name: tally-secrets, key: stripe-webhook-secret, optional: true } }
+          readinessProbe:
+            httpGet: { path: /api/health, port: http }
+            periodSeconds: 5
+            failureThreshold: 3
+          livenessProbe:
+            tcpSocket: { port: http }
+            periodSeconds: 10
+            failureThreshold: 3
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+          # About 190 MiB resident after 200 page renders (README, "Results (day 5)").
+          resources:
+            requests: { cpu: 100m, memory: 256Mi }
+            limits: { memory: 512Mi }
+          volumeMounts:
+            # The only places the server writes: Next.js's cache and the temporary directory.
+            - { name: next-cache, mountPath: /app/.next/cache }
+            - { name: tmp, mountPath: /tmp }
+      volumes:
+        - { name: next-cache, emptyDir: {} }
+        - { name: tmp, emptyDir: {} }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: tally-web
+spec:
+  selector: { app.kubernetes.io/name: tally, app.kubernetes.io/component: web }
+  ports:
+    - { name: http, port: 80, targetPort: http }

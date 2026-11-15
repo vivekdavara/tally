@@ -1,0 +1,40 @@
+# CI only (the "kubernetes" job): a throwaway Postgres 14 in the kind cluster, trusting every connection, with
+# scripts/db-setup.sh as its init script (from the ConfigMap tally-db-setup). Not for anything real.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postgres
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: postgres }
+  template:
+    metadata:
+      labels: { app: postgres }
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:14.24-bookworm@sha256:f23a2b27c0e11dce0d413c5ceb5ec747257a9961317587794e39c5ec4c49fd5c
+          env:
+            - { name: POSTGRES_HOST_AUTH_METHOD, value: trust }
+          ports:
+            - { containerPort: 5432 }
+          # Over TCP: the image's first start serves a temporary server on the socket only while init scripts run.
+          readinessProbe:
+            exec: { command: ["pg_isready", "-h", "127.0.0.1", "-U", "postgres", "-d", "tally"] }
+            periodSeconds: 2
+          volumeMounts:
+            - { name: setup, mountPath: /docker-entrypoint-initdb.d }
+      volumes:
+        # Executable, so the image runs it rather than sourcing it into its own shell.
+        - name: setup
+          configMap: { name: tally-db-setup, defaultMode: 0755, items: [{ key: db-setup.sh, path: 10-tally.sh }] }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+spec:
+  selector: { app: postgres }
+  ports:
+    - { port: 5432 }

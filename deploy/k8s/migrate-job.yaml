@@ -1,0 +1,31 @@
+# The release step: prisma migrate deploy as tally_owner, once per release, before web and worker change. The only
+# workload that gets the owner role's URL. Two at once are safe (Prisma takes an advisory lock), so a retry is too.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: tally-migrate
+spec:
+  backoffLimit: 2
+  activeDeadlineSeconds: 300
+  template:
+    metadata:
+      labels: { app.kubernetes.io/name: tally, app.kubernetes.io/component: migrate }
+    spec:
+      restartPolicy: Never
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: migrate
+          image: tally-migrate:1.0.0
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: MIGRATE_DATABASE_URL
+              valueFrom: { secretKeyRef: { name: tally-secrets, key: migrate-database-url } }
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+          resources:
+            requests: { cpu: 100m, memory: 256Mi }
+            limits: { memory: 512Mi }

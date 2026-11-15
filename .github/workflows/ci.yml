@@ -265,3 +265,72 @@ jobs:
         if: always()
         run: docker compose down -v
 
+
+  # deploy/k8s on a throwaway kind cluster: Postgres (deploy/ci), the secrets, the migration Job, then web and worker.
+  # kind and its node image pinned as in the Canary project.
+  kubernetes:
+    name: kubernetes (kind)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v7
+      - name: kind
+        run: |
+          curl -fsSLo kind https://github.com/kubernetes-sigs/kind/releases/download/v0.33.0/kind-linux-amd64
+          echo "aee6151561422756b764a4ae28e7f44cda5af5a9eead3cc9985112b1de8d8e0d  kind" | sha256sum -c -
+          sudo install kind /usr/local/bin/kind
+          kubectl version --client
+      - name: images
+        run: |
+          docker build --target migrate -t tally-migrate:1.0.0 .
+          docker build --target worker -t tally-worker:1.0.0 .
+          docker build -t tally-web:1.0.0 .
+      - name: cluster
+        run: |
+          kind create cluster --name tally --image kindest/node:v1.37.0@sha256:a1ed56cfb0e7b93589bdf97c8cd566405a265939e3620fc4f5de89adff580ae5 --wait 2m
+          kind load docker-image tally-migrate:1.0.0 tally-worker:1.0.0 tally-web:1.0.0 --name tally
+          kubectl create namespace tally
+          kubectl config set-context --current --namespace tally
+      - name: Postgres and the secrets
+        run: |
+          kubectl create configmap tally-db-setup --from-file=db-setup.sh=scripts/db-setup.sh
+          kubectl apply -f deploy/ci/postgres.yaml
+          kubectl rollout status deployment/postgres --timeout=180s
+          kubectl create secret generic tally-secrets \
+            --from-literal=database-url=postgresql://tally_app@postgres:5432/tally \
+            --from-literal=migrate-database-url=postgresql://tally_owner@postgres:5432/tally \
+            --from-literal=auth-secret="$(openssl rand -base64 32)"
+      - name: the release step, as a Job
+        run: |
+          kubectl apply -f deploy/k8s/config.yaml -f deploy/k8s/migrate-job.yaml
+          kubectl wait --for=condition=complete job/tally-migrate --timeout=240s
+          kubectl logs job/tally-migrate | tail -n 3
+      - name: web and worker roll out (web ready means /api/health answered 200)
+        run: |
+          kubectl apply -f deploy/k8s/web.yaml -f deploy/k8s/worker.yaml
+          kubectl rollout status deployment/tally-web --timeout=180s
+          kubectl rollout status deployment/tally-worker --timeout=180s
+      - name: the web server through its Service, and a worker pass
+        run: |
+          kubectl port-forward service/tally-web 18117:80 > port-forward.log 2>&1 &
+          for i in $(seq 30); do curl -fsS http://127.0.0.1:18117/api/health && break; sleep 1; done
+          echo
+          curl -fsS -o /dev/null -w "/signin %{http_code}\n" http://127.0.0.1:18117/signin
+          kill %1
+          for i in $(seq 30); do kubectl logs deployment/tally-worker > worker.log; grep -q '"job":"reminders"' worker.log && break; sleep 1; done
+          cat worker.log
+          grep -q '"job":"reminders"' worker.log
+      - name: a rolling restart replaces the web pod without going unready
+        run: |
+          kubectl rollout restart deployment/tally-web
+          kubectl rollout status deployment/tally-web --timeout=180s
+          kubectl get pods -o wide
+      - name: diagnostics
+        if: failure()
+        run: |
+          kubectl get all,events --sort-by=.metadata.creationTimestamp || true
+          kubectl describe pods || true
+          kubectl logs deployment/tally-web --all-containers || true
+          kubectl logs deployment/tally-worker || true
+          kubectl logs job/tally-migrate || true
+          kubectl logs deployment/postgres || true
