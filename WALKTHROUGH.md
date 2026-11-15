@@ -515,7 +515,16 @@ owner role's URL, then any number of `web` replicas behind the platform's TLS lo
 replicas, both with the app role's URL. Configuration is environment variables only, secrets from the platform's
 secret store. I didn't deploy it anywhere (the plan said not to); CI is where it's checked: build the images, run the
 release step, start the web image until its health check passes, run all 24 browser tests against it, run the worker
-image, stop both.
+image, stop both. `compose.yaml` runs the same model on one machine (Postgres included), and CI runs that too.
+
+**What did the reviews find on the last day?**
+Three rounds. The first proved nothing with a test but raised six real problems, the worst that `npm start` read a
+copy of `.env` the build had taken (secrets included) instead of the current file. The second found two bugs in my
+fixes for those: a CI step piped into `tee`, so GitHub's default `bash -e` without pipefail let a failed worker pass
+through, and a health-check test that couldn't fail because another container already answered on the port; and my
+env-file fix read `.env` alone, not the way `next start` does. The third found `npm start` let an invalid `PORT`
+silently become 3000 (round 1's version did the same). As on the earlier days, the later rounds' bugs were in the
+previous rounds' fixes.
 
 **Why three images instead of one?**
 Each gets only what it needs. The web and worker images hold Node, the standalone server and the worker bundle: no

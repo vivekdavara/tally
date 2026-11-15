@@ -706,6 +706,12 @@ flowchart LR
 - `HOSTNAME=0.0.0.0`: the standalone server binds to `$HOSTNAME`, and Docker sets that to the container's id, which
   resolves to the container's own address only, not loopback, so the health check on 127.0.0.1 would fail.
 
+`compose.yaml` runs the whole model on one machine for trying it: Postgres 14.24 (pinned by digest) with
+`scripts/db-setup.sh` as its init script, the migrate service to completion (`service_completed_successfully`), then
+web and worker. Trust authentication on the compose network and mock billing make it a local tool, not a deployment.
+Its Postgres health check goes over TCP: on first start the image serves a temporary server on the socket only while
+the init script runs, and a socket check would call that ready too early.
+
 ### Release order
 
 1. **Once per database:** the two roles and the database (`scripts/db-setup.sh` as a superuser or a role with
@@ -820,6 +826,8 @@ src/app/                        routes (App Router)
 scripts/worker.ts               the background worker: overdue reminders (and reconciliation in Stripe mode)
 scripts/build-worker.mjs        bundles the worker and reconcile commands into dist/ (esbuild)
 Dockerfile, .dockerignore       the web, worker and migrate images (see Deployment)
+compose.yaml                    Postgres, the release step, web and worker on one machine
+scripts/start.mjs               npm start: env files as next start reads them, then the standalone server
 src/server/db/                  Prisma clients (app and owner), withTenant, forEachOrganization, the role check
 src/server/auth/                passwords, credential verification, sign-up
 src/server/dal.ts               requireUser, requireMembership, requireTenant(slug, permission), runForInvitation
@@ -899,6 +907,8 @@ the same reason. The app listens on port 8117. Tests use a separate database, `t
   three images; check they run as `node` and hold no `.env` file; the web image exits 1 before the release step and
   as the owner role; the release step; the web image healthy; the 24 e2e tests against it
   (`E2E_EXTERNAL_SERVER=1`); a worker pass from the worker image; `docker stop` handled by both (exit 0 and 143).
+  And the **compose** job: `compose.yaml` up, the release step's exit code, the web server healthy, a worker pass.
+  `tests/review-d5r2/` runs the worker step's own lines from the workflow under `bash -e`, both ways.
 
 ## Versions
 
