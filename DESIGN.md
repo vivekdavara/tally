@@ -16,7 +16,7 @@ This file is the specification. When the code and this file disagree, one of the
 | D2 | Customers and invoices with line items; totals and taxes in exact decimal math; gapless invoice numbering; the invoice life cycle enforced in the database; invoice PDFs. |
 | D3 | Billing: a Stripe client behind an interface (mocked in tests), webhooks with signature verification and idempotent processing. |
 | D4 | Roles enforced (checked twice, the second time inside the transaction); members and invitation links, with the last owner kept by the database; a background job for overdue reminders; a tenant-isolation suite across every route and Server Action; Playwright e2e of all of it. |
-| D5 | Deploy-ready configuration (no deploy), results, walkthrough, v1.0.0. |
+| D5 | Deploy-ready configuration (no deploy): container images for the web server, the worker and the release step, verified in CI; results, walkthrough, v1.0.0. |
 
 ## Domain model
 
@@ -656,6 +656,113 @@ sequenceDiagram
 - Tally ships no email provider: the worker's `ConsoleMailer` writes each message to stdout as a JSON line, tests use
   `MemoryMailer`. In Stripe mode the worker also runs reconciliation every 15 minutes.
 
+## Deployment (day 5)
+
+Tally is ready to deploy and deliberately not deployed. What exists is everything a container platform (ECS, Cloud
+Run, Fly, Kubernetes, a VM with Docker) needs from the application: images, a release step, configuration through the
+environment, health, and clean stops. Verified in CI (the "container image" job), not on any platform.
+
+```mermaid
+flowchart LR
+    subgraph release["release step: once per version, before anything starts"]
+        MIG["tally-migrate<br/>prisma migrate deploy"]
+    end
+    subgraph processes["processes: any number of each"]
+        WEB["tally-web<br/>node server.js :8117<br/>HEALTHCHECK /api/health"]
+        WRK["tally-worker<br/>node dist/worker.mjs"]
+    end
+    LB["TLS proxy / load balancer<br/>(the platform's)"] --> WEB
+    STRIPE["Stripe"] -->|"signed webhooks"| LB
+    MIG -->|"tally_owner: DDL"| PG[("PostgreSQL 14+")]
+    WEB -->|"tally_app: bound by RLS"| PG
+    WRK -->|"tally_app: bound by RLS"| PG
+```
+
+### One Dockerfile, three images
+
+| Target | Runs | Contains | Gets |
+|---|---|---|---|
+| `web` (default) | `node server.js` (Next.js standalone) on `PORT` 8117 | Node 24, `.next/standalone` (server code plus only the `node_modules` it traces), the worker bundles | `DATABASE_URL` (tally_app), `AUTH_SECRET`, billing settings |
+| `worker` | `node dist/worker.mjs` (`--once` for one pass) | the same layers as `web` | `DATABASE_URL` (tally_app), billing settings |
+| `migrate` | `prisma migrate deploy`, then exits | production dependencies (Prisma's CLI is one), the schema and the SQL migrations | `MIGRATE_DATABASE_URL` (tally_owner) |
+
+- **The build produces two artifacts:** Next.js's standalone output (`output: "standalone"`), and the worker and
+  reconcile commands bundled by esbuild into single files with every dependency inside (`scripts/build-worker.mjs`),
+  so the runtime image needs neither TypeScript, tsx nor the source. `npm start`, Playwright and the image all run
+  the standalone server, so the e2e suite tests what ships; a test runs the worker bundle from a directory with no
+  `node_modules` above it.
+- **Only the migrate image ever gets the owner's credentials,** and it's the only one that contains the migrations
+  and the migration tool. The web and worker images run as `node` (uid 1000) over root-owned files.
+- **No secret is in an image.** `.dockerignore` keeps `.env` out of the build context; this matters more than usual
+  because the standalone build copies a project's `.env` next to `server.js`, which would put a developer's secrets
+  into the image layer. CI checks the built image has no `.env*` file outside `node_modules`.
+- The base image is `node:24.22.2-bookworm-slim`, pinned by digest. The install stages add OpenSSL, which Prisma's
+  migration engine needs; the runtime stage doesn't.
+- **Sizes** (CI, `docker image ls`): web and worker 289 MB each (they share every layer), migrate 943 MB. The migrate
+  image started at 1.3 GB, built on the full install with the compilers and test tools; it now runs its own
+  `npm ci --omit=dev`, which is why Prisma's CLI moved to `dependencies`. It still carries Next.js and React, which
+  only the build needs; a manifest of its own would cut that, at the cost of a second lock file to keep in step.
+- `HOSTNAME=0.0.0.0`: the standalone server binds to `$HOSTNAME`, and Docker sets that to the container's id, which
+  resolves to the container's own address only, not loopback, so the health check on 127.0.0.1 would fail.
+
+### Release order
+
+1. **Once per database:** the two roles and the database (`scripts/db-setup.sh` as a superuser or a role with
+   CREATEROLE and CREATEDB; on a managed Postgres, run its SQL as the admin user). Give `tally_owner` and `tally_app`
+   passwords there; the connection URLs carry them.
+2. **Every release, before the new code runs:** the migrate image, with `MIGRATE_DATABASE_URL`. Prisma takes an
+   advisory lock, so two release steps started at once don't race: run concurrently against a fresh database, one
+   applied all 14 migrations and the other waited and found none pending, both exit 0.
+3. **Then** web and worker, with `DATABASE_URL` as `tally_app`.
+
+The order is enforced, not only documented: a web or worker process started against a database without the
+row-level security policies (or as a role they don't bind) fails its startup check and exits 1 instead of serving
+with isolation off; CI starts the web image before the release step and checks for exit 1. During a rolling deploy
+the previous version runs against the new schema for a while, so a migration must keep working for the code before
+it (add, deploy, then remove in a later release). Tally's 14 migrations were written one day at a time with no
+running deployment, so that rule is stated, not yet exercised.
+
+### Configuration
+
+Everything comes from environment variables (the platform's secret store for the secret ones); `.env.example` lists
+them for local use.
+
+| Variable | web | worker | migrate | Notes |
+|---|---|---|---|---|
+| `DATABASE_URL` | ✓ | ✓ | | as `tally_app`; with a password and `sslmode` outside a laptop |
+| `MIGRATE_DATABASE_URL` | | | ✓ | as `tally_owner` |
+| `AUTH_SECRET` | ✓ | | | secret; the session cookie's key |
+| `AUTH_TRUST_HOST=true` or `AUTH_URL` | ✓ | | | behind a proxy that sets the Host header |
+| `BILLING_PROVIDER` | ✓ | ✓ | | `stripe` in any deployment with more than one web replica (below) |
+| `STRIPE_SECRET_KEY` | ✓ | ✓ | | secret; test-mode keys only (a live key is refused at startup) |
+| `STRIPE_WEBHOOK_SECRET` | ✓ | ✓ | | secret; the endpoint's signing secret |
+| `APP_BASE_URL` | ✓ | ✓ | | the public URL: checkout's return page, links in reminder emails |
+| `PORT` | ✓ | | | default 8117 |
+| `REMINDER_INTERVAL_MINUTES`, `RECONCILE_INTERVAL_MINUTES`, `RECONCILE_HOURS` | | ✓ | | 60, 15, 72 |
+
+### Health, stops and scaling
+
+- **Health:** `/api/health` answers 200 only when the database answers and the connection's role is bound by
+  row-level security, 503 otherwise; the image's `HEALTHCHECK` calls it every 10 s. It is a readiness check. Used as
+  a liveness check (restart when failing) it would restart every replica during a database outage, which fixes
+  nothing, so on Kubernetes it belongs in the readiness probe, with liveness on the TCP port.
+- **Stops:** `docker stop` (and Kubernetes) sends SIGTERM, then SIGKILL after a grace period. The web server stops
+  accepting connections, finishes the requests in flight and exits 143 (Next.js's handler); the worker finishes its
+  current step (each is one short transaction) and exits 0. Node runs as PID 1 (the image's entrypoint `exec`s it),
+  which only matters for signals without a handler, and both processes install one. CI checks both stop within the
+  10 s grace period with those exit codes, not 137.
+- **Scaling:** the web server keeps no state between requests (the session is a signed JWT cookie, every write
+  commits before the response), so replicas behind a load balancer need no affinity. The exception is the **mock
+  billing provider**, which keeps its checkout sessions in the server's memory: it is for development, and a
+  deployment with more than one web replica must use Stripe mode. Workers can run as several replicas or as a cron
+  job with `--once`. Each web process opens at most 10 database connections and each worker 4, so
+  `10 × web + 4 × workers` must stay under the database's connection limit (100 by default, less what admins and
+  the release step need), or a pooler goes in between. In transaction mode a pooler fits `withTenant`, whose
+  setting is transaction-local, but that is reasoning: no pooler has been tried.
+- **What the platform still has to provide:** TLS termination, an email provider (the worker writes emails to
+  stdout; `Mailer` is the interface to implement), Postgres backups and point-in-time recovery, log collection (both
+  processes log to stdout/stderr, the worker as JSON lines), and rate limiting in front of sign-in.
+
 ## Architecture
 
 ```mermaid
@@ -710,6 +817,8 @@ prisma.config.ts                Prisma CLI configuration (migration URL)
 scripts/db-setup.sh             roles and databases, idempotent
 src/app/                        routes (App Router)
 scripts/worker.ts               the background worker: overdue reminders (and reconciliation in Stripe mode)
+scripts/build-worker.mjs        bundles the worker and reconcile commands into dist/ (esbuild)
+Dockerfile, .dockerignore       the web, worker and migrate images (see Deployment)
 src/server/db/                  Prisma clients (app and owner), withTenant, forEachOrganization, the role check
 src/server/auth/                passwords, credential verification, sign-up
 src/server/dal.ts               requireUser, requireMembership, requireTenant(slug, permission), runForInvitation
@@ -734,8 +843,9 @@ tests/                          Vitest: unit tests and integration tests against
 | `STRIPE_WEBHOOK_SECRET` | the webhook endpoint's signing secret (`whsec_...`); required in Stripe mode; in mock mode a random one is made per process if unset | unset |
 | `APP_BASE_URL` | where checkout returns the customer (`/paid`) | `http://localhost:8117` |
 
-Local Postgres 14 runs on the default port 5432 with trust authentication for local connections, so no database
-password exists anywhere in the repository; CI's service container runs with `POSTGRES_HOST_AUTH_METHOD=trust` for
+The variables each process needs in a deployment are in "Deployment", "Configuration". Local Postgres 14 runs on
+the default port 5432 with trust authentication for local connections, so no database password exists anywhere in
+the repository; CI's service container runs with `POSTGRES_HOST_AUTH_METHOD=trust` for
 the same reason. The app listens on port 8117. Tests use a separate database, `tally_test`.
 
 ## Testing
@@ -780,12 +890,19 @@ the same reason. The app listens on port 8117. Tests use a separate database, `t
   locks other files' writes would wait on (a deadlock once, when they ran in parallel). And one run at a time per
   database: the global setup empties the tables, so it holds an advisory lock for the whole run, and a second run
   against the same database stops at once (two did collide on day 2, and a test's organization vanished mid-run).
+- **Deployment (day 5):** the worker bundle built into a temporary directory with no `node_modules` above it and run
+  there (a pass that sends a reminder, the owner role refused, a missing setting named, SIGTERM while sleeping); the
+  e2e suite against the standalone server, which is what `npm start` and the image run.
 - **CI (GitHub Actions):** a Postgres 14 service container; `npm ci`, the setup script, migrations, typecheck, lint,
-  tests and `next build` on Node 22 and 24.
+  tests and `next build` on Node 22 and 24; the e2e suite in Chrome; and the **container image** job: build the
+  three images; check they run as `node` and hold no `.env` file; the web image exits 1 before the release step and
+  as the owner role; the release step; the web image healthy; the 24 e2e tests against it
+  (`E2E_EXTERNAL_SERVER=1`); a worker pass from the worker image; `docker stop` handled by both (exit 0 and 143).
 
 ## Versions
 
-Node 22.12+ or 24 (Prisma 7 and Vitest 5 require one of those; CI tests both). Next.js 16.4.5, React 19.3.1,
+Node 22.12+ or 24 (Prisma 7 and Vitest 5 require one of those; CI tests both; the images run Node 24.22.2 on Debian
+12, `node:24.22.2-bookworm-slim` pinned by digest). esbuild 0.28.2 (already in the tree through tsx and Vitest). Next.js 16.4.5, React 19.3.1,
 Prisma 7.10.1, Auth.js 5.0.0-beta.32, Zod 4.6.7, TypeScript 5.9.3, Vitest 5.1.0, ESLint 9.39.5. Every version is
 pinned exactly and was at least a week old when chosen. TypeScript stays on 5.9 because typescript-eslint supports
 TypeScript below 6.1 and TypeScript 7 (the native compiler) doesn't yet have the compiler API that Next.js's type
