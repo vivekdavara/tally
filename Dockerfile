@@ -38,9 +38,10 @@ RUN npm run build
 # The release step. Runs `prisma migrate deploy` with MIGRATE_DATABASE_URL (the owner role), then exits. It is the
 # only image that holds the migrations and the only process that should ever get the owner's credentials. Its own
 # install, production dependencies only (Prisma's CLI is one, for this image): built on `deps`, with the compilers
-# and test tools the build needs, it was 1.3 GB.
+# and test tools the build needs, it was 1.3 GB. No optional packages either: among the production ones those are
+# Next.js's compiler binary and sharp's image library, which a migration never loads.
 FROM install AS migrate
-RUN npm ci --omit=dev && npm cache clean --force
+RUN npm ci --omit=dev --omit=optional && npm cache clean --force
 USER node
 CMD ["node_modules/.bin/prisma", "migrate", "deploy"]
 
