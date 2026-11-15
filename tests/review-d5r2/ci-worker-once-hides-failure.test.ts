@@ -50,3 +50,20 @@ test("a failing --once pass fails the CI step", () => {
   expect(step.stdout).toContain('"job":"reminders","error"');
   expect(step.status, `step output:\n${step.stdout}${step.stderr}`).not.toBe(0);
 });
+
+// Added after round 3 of day 5 noted the test above would also pass if the step always failed: with the grant back,
+// the same lines succeed.
+test("a passing --once pass passes the CI step", () => {
+  psql("GRANT SELECT ON organizations TO tally_app");
+  try {
+    const worker = `${join(root, "node_modules/.bin/tsx")} ${join(root, "scripts/worker.ts")} --once`;
+    const local = onceLines().replace(/docker run --rm --network host -e DATABASE_URL="\$APP_URL" tally-worker node dist\/worker\.mjs --once/, `(cd ${root} && ${worker})`);
+    expect(local).not.toContain("docker");
+    const dir = mkdtempSync(join(tmpdir(), "d5r2-ok-"));
+    const step = spawnSync("bash", ["-e", "-c", local], { cwd: dir, env: { ...process.env, APP_URL: app, DATABASE_URL: app }, encoding: "utf8" });
+    expect(step.status, `step output:\n${step.stdout}${step.stderr}`).toBe(0);
+    expect(step.stdout).toContain('"worker":"stopped"');
+  } finally {
+    psql("REVOKE SELECT ON organizations FROM tally_app");
+  }
+});

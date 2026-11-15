@@ -54,6 +54,16 @@ it("keeps a PORT the shell sets", () => {
   expect(start({ PORT: "9000" }).PORT).toBe("9000");
 });
 
+it("refuses a PORT that isn't a port number, and treats an empty one as unset", () => {
+  for (const port of ["0", "abc", " ", "65536", "80x"]) {
+    const result = spawnSync(process.execPath, [START], { cwd: project, env: { PATH: process.env.PATH ?? "", PORT: port } as unknown as NodeJS.ProcessEnv, encoding: "utf8" });
+    expect(result.status, port).toBe(2);
+    expect(result.stderr).toContain("PORT must be a port number from 1 to 65535");
+  }
+  expect(start({ PORT: "" }).PORT).toBe("8117");
+  expect(start({ PORT: "65535" }).PORT).toBe("65535");
+});
+
 it("refuses to start without a build", () => {
   const empty = mkdtempSync(join(tmpdir(), "tally-start-empty-"));
   try {

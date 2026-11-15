@@ -221,6 +221,7 @@ jobs:
         if: failure()
         run: |
           docker logs web || true
+          docker logs web2 || true
           docker logs worker || true
       - uses: actions/upload-artifact@v7
         if: failure()

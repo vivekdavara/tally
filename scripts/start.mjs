@@ -7,7 +7,7 @@
 // secrets included), so this is the only place the files are read. Review round 2 of day 5: the first version passed
 // .env alone with `node --env-file-if-exists`, which skips the other files and doesn't expand $VARIABLE.
 //
-//   npm start            port 8117 unless PORT says otherwise; every interface, like next start
+//   npm start            port 8117 unless PORT says otherwise; every IPv4 interface
 
 // A CommonJS module whose exports Node can't see statically: import the whole of it.
 import nextEnv from "@next/env";
@@ -23,9 +23,18 @@ if (!existsSync(server)) {
 }
 
 nextEnv.loadEnvConfig(project, false);
-process.env.PORT ||= "8117";
-// The standalone server binds to $HOSTNAME, which some shells and every container export as the machine's name;
-// next start listened on every interface, and so does this.
+// The standalone server reads PORT as `parseInt(PORT) || 3000`, so 0, "abc" or " " would quietly serve on 3000; next
+// start refuses them, and so does this (review round 3 of day 5). Unset or empty means the default.
+const port = process.env.PORT ?? "";
+if (port === "") {
+  process.env.PORT = "8117";
+} else if (!/^[0-9]+$/.test(port) || Number(port) < 1 || Number(port) > 65535) {
+  console.error(`start: PORT must be a port number from 1 to 65535, not ${JSON.stringify(port)}`);
+  process.exit(2);
+}
+// The standalone server binds to $HOSTNAME, which some shells and every container export as the machine's name.
+// 0.0.0.0 is every IPv4 interface. (next start listened on "::", IPv6 too when the machine has it; an explicit "::"
+// fails where IPv6 is off, and the server has no way to say "the default". Browsers fall back to 127.0.0.1.)
 process.env.HOSTNAME = "0.0.0.0";
 
 await import(pathToFileURL(server).href);
