@@ -37,7 +37,7 @@ The headline numbers, each from the day's section below, where the conditions an
 | The role re-check inside the transaction | about 150 µs per page or action | `npm run bench:reminders` (4) |
 | Server start | healthy (startup check passed) in a median 318 / 315 ms; 187 MiB resident after 200 page renders; SIGTERM to exit 4 to 5 ms | `npm run bench:startup` (5) |
 | Images | web and worker 289 MB, migrate 780 MB (from 1.3 GB); web healthy about 7 s after `docker run`; `docker stop` under 0.1 s, handled; the same images run by `compose.yaml` and deployed to a kind cluster | CI "container image", "compose", "kubernetes (kind)" jobs (5) |
-| Review rounds | bugs proven per round: day 1: 9, 5; day 2: 4, 7, 3, 2; day 3: 2, 2, 2, 1, 3, 0; day 4: 3, 2; day 5: 0 (six suspicions, all fixed), 3, 1 | README "Review" |
+| Review rounds | bugs proven per round: day 1: 9, 5; day 2: 4, 7, 3, 2; day 3: 2, 2, 2, 1, 3, 0; day 4: 3, 2; day 5: 0 (six suspicions, all fixed), 3, 1, then 7 from a reading review of the deployment config | README "Review" |
 
 ## Reading order
 
@@ -234,13 +234,15 @@ docker run -d -e DATABASE_URL=postgresql://tally_app:...@db/tally -e BILLING_PRO
 ```
 
 To try all of it on one machine, `compose.yaml` runs Postgres (with the setup script as its init script), the release
-step, then web and worker: `AUTH_SECRET=$(openssl rand -base64 32) docker compose up --build`, then
-http://localhost:8117 (trust authentication and mock billing: for trying, not for production).
+step, then web and worker: `export AUTH_SECRET=$(openssl rand -base64 32)` (every compose command needs it), `docker
+compose up --build`, then http://localhost:8117 (trust authentication and mock billing: for trying, not for
+production).
 
 On Kubernetes, `deploy/k8s/` has the config, the release step as a Job, and the web and worker Deployments (readiness
 on `/api/health`, liveness on the port, non-root, read-only root filesystem); `deploy/k8s/config.yaml` shows how to
 make the Secret, which isn't in the repository. Apply `config.yaml` and `migrate-job.yaml`, wait for the Job, then
-`web.yaml` and `worker.yaml`. CI deploys exactly these to a kind cluster.
+`web.yaml` and `worker.yaml`; each release changes the image tags and the Job's name (`tally-migrate-v1-0-0`)
+together. CI deploys exactly these to a kind cluster.
 
 The database roles come first, once (`scripts/db-setup.sh`, or its SQL by hand on a managed Postgres, with passwords).
 The images run as an unprivileged user and hold no secrets; the web image has a health check on `/api/health`; both
@@ -510,8 +512,18 @@ A third agent at `37544fa`, on round 2's fixes (6 minutes, `tests/review-d5r3/`)
 file edit and both CI steps sound, and proved one gap, fixed in `f96eb4d`: **`npm start` passed any `PORT` through,**
 and the standalone server reads it as `parseInt(PORT) || 3000`, so `PORT=0`, `abc` or a space served on 3000 without a
 word; `next start` refuses those, and now so does `npm start`. From its suspicions, the CI-step test also checks the
-passing direction now (it would have passed for a step that always failed). Per round: 0 proven (six suspicions, all
-real), 3, 1.
+passing direction now (it would have passed for a step that always failed).
+
+A fourth agent at `7a51ea4` reviewed the newest files, `compose.yaml`, `deploy/k8s/` and their CI jobs, by reading (no
+Docker or cluster on this machine; 5 minutes); its findings were fixed in `013c53d`. The serious one: **the migration
+Job had a fixed name**, so the next release's `kubectl apply` would be refused (a Job's pod template can't change), or,
+with the same image tag, change nothing while `kubectl wait` returned at once on the previous release's finished Job:
+no migration, and web and worker rolled out anyway. The Job's name now carries the version. Also: DESIGN claimed a
+read-only root filesystem for every pod and the migrate Job didn't have one; service-account tokens were mounted in
+pods that never call the API; the compose file's header showed commands that fail without `AUTH_SECRET`; two
+generated CI secrets were written to `$GITHUB_ENV` unmasked; and three CI checks could fall through (health through
+the Service printed but not asserted, the long-running worker's pass, the rolling restart). Per round: 0 proven (six
+suspicions, all real), 3, 1, and 7 from the reading review.
 
 Checked and found by my own work: the e2e suite had only ever run against a standalone server inside the repository,
 where Node can fall back to the project's own `node_modules`; copied outside it, it still passed all 24, which is what

@@ -529,13 +529,15 @@ manifest, and added a CI check for it; on kind's containerd the image's `HOSTNAM
 check failed and the comment was corrected. The pod spec still sets it, so the binding doesn't depend on the runtime.
 
 **What did the reviews find on the last day?**
-Three rounds. The first proved nothing with a test but raised six real problems, the worst that `npm start` read a
+Four rounds. The first proved nothing with a test but raised six real problems, the worst that `npm start` read a
 copy of `.env` the build had taken (secrets included) instead of the current file. The second found two bugs in my
 fixes for those: a CI step piped into `tee`, so GitHub's default `bash -e` without pipefail let a failed worker pass
 through, and a health-check test that couldn't fail because another container already answered on the port; and my
 env-file fix read `.env` alone, not the way `next start` does. The third found `npm start` let an invalid `PORT`
 silently become 3000 (round 1's version did the same). As on the earlier days, the later rounds' bugs were in the
-previous rounds' fixes.
+previous rounds' fixes. The fourth read the newest files, the compose file and the Kubernetes manifests, and found
+the worst problem of the day: the migration Job had a fixed name, so the next release would either be refused or skip
+its migration while `kubectl wait` returned at once on the old Job. Its name now carries the version.
 
 **Why three images instead of one?**
 Each gets only what it needs. The web and worker images hold Node, the standalone server and the worker bundle: no

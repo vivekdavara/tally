@@ -713,11 +713,14 @@ Its Postgres health check goes over TCP: on first start the image serves a tempo
 the init script runs, and a socket check would call that ready too early.
 
 `deploy/k8s/` is the same model for Kubernetes: a ConfigMap; the release step as a Job (the only workload given the
-owner role's URL, from a Secret the repository doesn't contain); the web Deployment and Service, with readiness on
+owner role's URL, from a Secret the repository doesn't contain), one per release, its name carrying the version
+(`tally-migrate-v1-0-0`: a Job's pod template can't change, so a fixed name would block the next release or, with the
+same tag, silently skip its migration; review round 4), with retries but no deadline (a migration killed partway is
+left failed, and every later run stops on it until resolved); the web Deployment and Service, with readiness on
 `/api/health` and liveness on the TCP port (below), `maxUnavailable: 0`, a 30 s grace period, requests and limits
 from the measured memory; and the worker Deployment. Every pod runs as uid 1000 with no privilege escalation, no
-capabilities, the runtime's seccomp profile and a read-only root filesystem (the web server gets `emptyDir`s for
-`.next/cache` and `/tmp`). The web pod sets `HOSTNAME=0.0.0.0` too, though the image already does and on kind's
+capabilities, the runtime's seccomp profile, no service-account token, and a read-only root filesystem (`emptyDir`s
+with size limits for `/tmp`, and for the web server `.next/cache`). The web pod sets `HOSTNAME=0.0.0.0` too, though the image already does and on kind's
 containerd the image's value reaches the pod (CI checks it with a pod from the same image): the binding shouldn't
 depend on the runtime keeping an image variable. (I first wrote that Kubernetes replaces `HOSTNAME` with the pod's
 name; the check showed otherwise.) CI's
