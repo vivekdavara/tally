@@ -712,6 +712,17 @@ web and worker. Trust authentication on the compose network and mock billing mak
 Its Postgres health check goes over TCP: on first start the image serves a temporary server on the socket only while
 the init script runs, and a socket check would call that ready too early.
 
+`deploy/k8s/` is the same model for Kubernetes: a ConfigMap; the release step as a Job (the only workload given the
+owner role's URL, from a Secret the repository doesn't contain); the web Deployment and Service, with readiness on
+`/api/health` and liveness on the TCP port (below), `maxUnavailable: 0`, a 30 s grace period, requests and limits
+from the measured memory; and the worker Deployment. Every pod runs as uid 1000 with no privilege escalation, no
+capabilities, the runtime's seccomp profile and a read-only root filesystem (the web server gets `emptyDir`s for
+`.next/cache` and `/tmp`). The web pod sets `HOSTNAME=0.0.0.0` too, though the image already does and on kind's
+containerd the image's value reaches the pod (CI checks it with a pod from the same image): the binding shouldn't
+depend on the runtime keeping an image variable. (I first wrote that Kubernetes replaces `HOSTNAME` with the pod's
+name; the check showed otherwise.) CI's
+"kubernetes (kind)" job deploys these files to a kind cluster with a throwaway Postgres (`deploy/ci/`).
+
 ### Release order
 
 1. **Once per database:** the two roles and the database (`scripts/db-setup.sh` as a superuser or a role with
@@ -827,6 +838,7 @@ scripts/worker.ts               the background worker: overdue reminders (and re
 scripts/build-worker.mjs        bundles the worker and reconcile commands into dist/ (esbuild)
 Dockerfile, .dockerignore       the web, worker and migrate images (see Deployment)
 compose.yaml                    Postgres, the release step, web and worker on one machine
+deploy/k8s/, deploy/ci/         Kubernetes manifests; CI's throwaway Postgres for the kind job
 scripts/start.mjs               npm start: env files as next start reads them, then the standalone server
 src/server/db/                  Prisma clients (app and owner), withTenant, forEachOrganization, the role check
 src/server/auth/                passwords, credential verification, sign-up
@@ -908,6 +920,8 @@ the same reason. The app listens on port 8117. Tests use a separate database, `t
   as the owner role; the release step; the web image healthy; the 24 e2e tests against it
   (`E2E_EXTERNAL_SERVER=1`); a worker pass from the worker image; `docker stop` handled by both (exit 0 and 143).
   And the **compose** job: `compose.yaml` up, the release step's exit code, the web server healthy, a worker pass.
+  And **kubernetes (kind)**: `deploy/k8s/` on a kind cluster: the migration Job, both rollouts, the web server through
+  its Service, a worker pass, the web pod's `HOSTNAME`, a rolling restart.
   `tests/review-d5r2/` runs the worker step's own lines from the workflow under `bash -e`, both ways.
 
 ## Versions

@@ -515,7 +515,18 @@ owner role's URL, then any number of `web` replicas behind the platform's TLS lo
 replicas, both with the app role's URL. Configuration is environment variables only, secrets from the platform's
 secret store. I didn't deploy it anywhere (the plan said not to); CI is where it's checked: build the images, run the
 release step, start the web image until its health check passes, run all 24 browser tests against it, run the worker
-image, stop both. `compose.yaml` runs the same model on one machine (Postgres included), and CI runs that too.
+image, stop both. `compose.yaml` runs the same model on one machine (Postgres included), and `deploy/k8s/` on
+Kubernetes; CI runs both, the second on a kind cluster.
+
+**What's in the Kubernetes manifests, and why?**
+The migration is a Job, applied and waited for before the Deployments change, and it's the only workload that gets the
+owner role's URL. The web Deployment's readiness probe is `/api/health`, so a pod that can't reach its database (or
+is connected as the wrong role) leaves the Service; its liveness probe is only the TCP port, so a database outage
+doesn't restart every pod. Every pod runs as a non-root user with no capabilities and a read-only root filesystem;
+the web server writes only to `emptyDir`s for Next.js's cache and `/tmp`. One thing I got wrong: I believed
+Kubernetes replaces `HOSTNAME` with the pod's name (the standalone server binds to `$HOSTNAME`), wrote that into the
+manifest, and added a CI check for it; on kind's containerd the image's `HOSTNAME=0.0.0.0` reached the pod, so the
+check failed and the comment was corrected. The pod spec still sets it, so the binding doesn't depend on the runtime.
 
 **What did the reviews find on the last day?**
 Three rounds. The first proved nothing with a test but raised six real problems, the worst that `npm start` read a

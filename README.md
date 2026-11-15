@@ -146,6 +146,7 @@ scripts/build-worker.mjs         bundles the worker and reconcile commands into 
 scripts/bench-startup.mjs        the production server's time to healthy, memory and stop time
 scripts/start.mjs                npm start: the standalone server with the env files read as next start reads them
 compose.yaml                     Postgres, the release step, web and worker on one machine (docker compose up)
+deploy/k8s/                      Kubernetes: config, the migration Job, web (Deployment, Service), worker
 Dockerfile, .dockerignore        the web, worker and migrate images
 CHANGELOG.md                     what 1.0.0 contains
 src/server/db/tenant.ts          withTenant
@@ -234,14 +235,20 @@ To try all of it on one machine, `compose.yaml` runs Postgres (with the setup sc
 step, then web and worker: `AUTH_SECRET=$(openssl rand -base64 32) docker compose up --build`, then
 http://localhost:8117 (trust authentication and mock billing: for trying, not for production).
 
+On Kubernetes, `deploy/k8s/` has the config, the release step as a Job, and the web and worker Deployments (readiness
+on `/api/health`, liveness on the port, non-root, read-only root filesystem); `deploy/k8s/config.yaml` shows how to
+make the Secret, which isn't in the repository. Apply `config.yaml` and `migrate-job.yaml`, wait for the Job, then
+`web.yaml` and `worker.yaml`. CI deploys exactly these to a kind cluster.
+
 The database roles come first, once (`scripts/db-setup.sh`, or its SQL by hand on a managed Postgres, with passwords).
 The images run as an unprivileged user and hold no secrets; the web image has a health check on `/api/health`; both
 processes stop cleanly on SIGTERM. Docker isn't installed on the machine this was built on, so the images are built
 and tested only in CI: the "container image" job builds all three, checks the web image refuses to start before the
 migrations and as the owner role, runs the release step, waits for the web container to be healthy (also on another
 `PORT`), runs the 24 Playwright tests against it (`E2E_EXTERNAL_SERVER=1`), runs a worker pass, and checks
-`docker stop` is handled, not killed; the "compose" job runs `compose.yaml` the same way. What a platform still
-provides: TLS, an email provider, backups, log collection.
+`docker stop` is handled, not killed; the "compose" job runs `compose.yaml` the same way, and the "kubernetes (kind)"
+job deploys `deploy/k8s/` to a kind cluster. What a platform still provides: TLS, an email provider, backups, log
+collection.
 
 ## Results (day 5)
 
@@ -280,6 +287,11 @@ applications (nothing of this project running). Image numbers from CI (GitHub's 
   ready`, and the two others), the migrate container applied the migrations and exited 0, the web server answered
   `/api/health` about 2 s after `docker compose up -d` returned, and `docker compose run worker ... --once` logged its
   pass.
+- **`deploy/k8s` on kind** (CI, "kubernetes (kind)" job at `227bb33`, kind 0.33.0, Kubernetes 1.37): a throwaway
+  Postgres ran the setup script; the migration Job completed (`All migrations have been successfully applied`); web
+  and worker rolled out, web only once its readiness probe on `/api/health` passed; through the Service, `/api/health`
+  answered `{"status":"ok"}` and `/signin` 200; the worker logged a reminders pass; a rolling restart replaced the web
+  pod. All on the first run, with a read-only root filesystem.
 - **Two release steps at once:** two `prisma migrate deploy` started together against a fresh database: one applied
   all 14 migrations, the other waited on Prisma's advisory lock and found none pending; both exited 0, 14 rows in
   `_prisma_migrations`, none unfinished.
@@ -505,7 +517,10 @@ the image relies on. The image job's first run failed on my own check (`find /` 
 non-zero under `bash -e`), not on the images. A lock file regenerated with this Mac's npm 10.9.2 dropped the `libc`
 markers of unrelated packages; the change was redone with npm 11.21.1, which made the lock file. My leave e2e test
 expected `/o` after leaving, but `/o` sends someone with one organization straight to it; it passed here by catching
-`/o` before the redirect and failed in CI's slower run.
+`/o` before the redirect and failed in CI's slower run. The Kubernetes manifest said Kubernetes replaces `HOSTNAME` with
+the pod's name; a CI check I added for it showed the image's value reaches the pod on kind's containerd, so the comment
+was corrected. That check's first version used `! grep`, which `bash -e` never stops on: it could not have failed. And
+the startup benchmark's `lsof` call found no listener on CI's Linux runner (exit 1); it measures the spawned process.
 
 ### Day 4
 
