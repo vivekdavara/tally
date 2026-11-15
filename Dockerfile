@@ -51,7 +51,9 @@ WORKDIR /app
 ENV NODE_ENV=production NEXT_TELEMETRY_DISABLED=1
 COPY --from=build /app/.next/standalone ./
 COPY --from=build /app/dist/worker.mjs /app/dist/reconcile.mjs ./dist/
-# Read-only for the process: it runs as `node` (uid 1000) and the files stay root's.
+# Read-only for the process: it runs as `node` (uid 1000) and the files stay root's, except Next.js's cache
+# directory, where it may write rendered pages and fetch results.
+RUN mkdir -p .next/cache && chown node:node .next/cache
 USER node
 
 # The worker: runs the jobs on an interval, stops cleanly on SIGTERM (exit 0). `--once` runs one pass, for cron.
@@ -65,7 +67,8 @@ CMD ["node", "dist/worker.mjs"]
 FROM runtime AS web
 ENV PORT=8117 HOSTNAME=0.0.0.0
 EXPOSE 8117
-# /api/health answers 200 only when the database answers and the role is bound by row-level security.
+# /api/health answers 200 only when the database answers and the role is bound by row-level security. On the port
+# the server listens on, which the container's PORT may change.
 HEALTHCHECK --interval=10s --timeout=3s --start-period=20s --retries=3 \
-  CMD ["node", "-e", "fetch('http://127.0.0.1:8117/api/health').then(r => process.exit(r.ok ? 0 : 1), () => process.exit(1))"]
+  CMD ["node", "-e", "fetch(`http://127.0.0.1:${process.env.PORT}/api/health`).then(r => process.exit(r.ok ? 0 : 1), () => process.exit(1))"]
 CMD ["node", "server.js"]

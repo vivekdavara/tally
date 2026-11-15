@@ -1,7 +1,10 @@
 # The build context: what `COPY . .` can see. Secrets and local build output never go in. A .env here would be
 # copied into the image by Next.js's standalone output (it copies the project's .env files next to server.js).
+# Plain patterns match at the root only; the ** ones catch .env files anywhere (prisma/ is copied whole).
 .env
 .env.*
+**/.env
+**/.env.*
 .git
 .github
 node_modules

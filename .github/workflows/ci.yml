@@ -130,9 +130,11 @@ jobs:
             test "$user" = node
           done
           # As root, so find can read every directory; its exit status (unreadable /proc entries) doesn't matter.
-          found=$(docker run --rm --user root --entrypoint sh tally-web -c "find / -xdev -name '.env*' -not -path '*/node_modules/*' 2>/dev/null; true")
-          echo "env files in tally-web: ${found:-none}"
-          test -z "$found"
+          for image in tally-web tally-worker tally-migrate; do
+            found=$(docker run --rm --user root --entrypoint sh "$image" -c "find / -xdev -name '.env*' -not -path '*/node_modules/*' 2>/dev/null; true")
+            echo "env files in $image: ${found:-none}"
+            test -z "$found"
+          done
       - run: scripts/db-setup.sh tally_e2e
       - name: before the release step, the web image refuses to start
         run: |
@@ -166,6 +168,16 @@ jobs:
           done
           docker inspect -f '{{.State.Health.Status}}' web | grep -qx healthy
           curl -fsS http://localhost:8117/api/health
+      - name: the health check follows PORT
+        run: |
+          docker run -d --name web2 --network host -e PORT=8119 -e DATABASE_URL="$APP_URL" -e AUTH_SECRET="$(openssl rand -base64 32)" tally-web
+          for i in $(seq 90); do
+            status=$(docker inspect -f '{{.State.Health.Status}}' web2)
+            if [ "$status" = healthy ]; then echo "healthy on 8119 after about $i s"; break; fi
+            sleep 1
+          done
+          docker inspect -f '{{.State.Health.Status}}' web2 | grep -qx healthy
+          docker rm -f web2
       - uses: actions/setup-node@v7
         with:
           node-version: '24'
@@ -178,7 +190,9 @@ jobs:
           E2E_ADMIN_DATABASE_URL: postgresql://postgres@localhost:5432/tally_e2e
       - name: the worker image runs a pass, then stops on SIGTERM with exit 0
         run: |
-          docker run --rm --network host -e DATABASE_URL="$APP_URL" tally-worker node dist/worker.mjs --once
+          docker run --rm --network host -e DATABASE_URL="$APP_URL" tally-worker node dist/worker.mjs --once | tee once.log
+          grep -q '"job":"reminders"' once.log
+          grep -q '"worker":"stopped"' once.log
           docker run -d --name worker --network host -e DATABASE_URL="$APP_URL" tally-worker
           for i in $(seq 30); do docker logs worker 2>&1 | grep -q '"job":"reminders"' && break; sleep 1; done
           start=$(date +%s.%N)
