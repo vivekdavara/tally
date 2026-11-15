@@ -720,7 +720,11 @@ left failed, and every later run stops on it until resolved); the web Deployment
 `/api/health` and liveness on the TCP port (below), `maxUnavailable: 0`, a 30 s grace period, requests and limits
 from the measured memory; and the worker Deployment. Every pod runs as uid 1000 with no privilege escalation, no
 capabilities, the runtime's seccomp profile, no service-account token, and a read-only root filesystem (`emptyDir`s
-with size limits for `/tmp`, and for the web server `.next/cache`). The web pod sets `HOSTNAME=0.0.0.0` too, though the image already does and on kind's
+with size limits for `/tmp` in the web and migrate pods and for the web server's `.next/cache`; the worker writes
+nowhere). `tests/unit/k8s-release.test.ts` requires the Job's name and the three image tags to match the package's
+version, so a release can't bump one and forget the other (review round 5). Without a deadline, a Job whose pod never
+starts (a missing Secret key, a wrong tag) waits forever: wait for it with a timeout and delete it before fixing the
+cause, or the migration runs unwatched when the cause is fixed. The web pod sets `HOSTNAME=0.0.0.0` too, though the image already does and on kind's
 containerd the image's value reaches the pod (CI checks it with a pod from the same image): the binding shouldn't
 depend on the runtime keeping an image variable. (I first wrote that Kubernetes replaces `HOSTNAME` with the pod's
 name; the check showed otherwise.) CI's

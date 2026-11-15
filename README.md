@@ -28,7 +28,7 @@ The headline numbers, each from the day's section below, where the conditions an
 
 | What | Result | Command (day) |
 |---|---|---|
-| Tests | 719 Vitest tests in 83 files, 25 Playwright tests, all passing; the 25 also pass against the web container in CI | `npm run check`, `npm run e2e` (5) |
+| Tests | 721 Vitest tests in 84 files, 25 Playwright tests, all passing; the 25 also pass against the web container in CI | `npm run check`, `npm run e2e` (5) |
 | Cost of tenant isolation per request | p50 914 µs through `withTenant` vs 409 µs for one bare query: four extra round trips, not the policy | `npm run bench` (1) |
 | Sign-in timing | 49.6 ms at the median for a wrong password, an unknown email and the right password alike | `npm run bench:signin` (1) |
 | Gapless numbering under contention | 16 concurrent finalizers: p95 23.5 ms in one organization vs 8.3 ms spread over many | `npm run bench:finalize` (2) |
@@ -37,7 +37,7 @@ The headline numbers, each from the day's section below, where the conditions an
 | The role re-check inside the transaction | about 150 µs per page or action | `npm run bench:reminders` (4) |
 | Server start | healthy (startup check passed) in a median 318 / 315 ms; 187 MiB resident after 200 page renders; SIGTERM to exit 4 to 5 ms | `npm run bench:startup` (5) |
 | Images | web and worker 289 MB, migrate 780 MB (from 1.3 GB); web healthy about 7 s after `docker run`; `docker stop` under 0.1 s, handled; the same images run by `compose.yaml` and deployed to a kind cluster | CI "container image", "compose", "kubernetes (kind)" jobs (5) |
-| Review rounds | bugs proven per round: day 1: 9, 5; day 2: 4, 7, 3, 2; day 3: 2, 2, 2, 1, 3, 0; day 4: 3, 2; day 5: 0 (six suspicions, all fixed), 3, 1, then 7 from a reading review of the deployment config | README "Review" |
+| Review rounds | bugs proven per round: day 1: 9, 5; day 2: 4, 7, 3, 2; day 3: 2, 2, 2, 1, 3, 0; day 4: 3, 2; day 5: 0 (six suspicions, all fixed), 3, 1, then two reading reviews of the deployment config (7 and 6 findings, all fixed) | README "Review" |
 
 ## Reading order
 
@@ -259,7 +259,7 @@ collection.
 Apple M3 laptop (macOS 26.6.2, Node 23.11, Postgres 14.20), on battery, load average 3.4 to 3.9 from other
 applications (nothing of this project running). Image numbers from CI (GitHub's ubuntu-24.04 runners).
 
-- **Tests:** 719 Vitest tests in 83 files (`npm run check`, 54.4 s, files one at a time), 25 of them new today; 25
+- **Tests:** 721 Vitest tests in 84 files (`npm run check`, files one at a time, about 55 s), 27 of them new today; 25
   Playwright tests (`npm run e2e`, 21.9 s), 1 new, now run against the standalone server. New: the worker bundle run
   from a directory with no `node_modules` above it (a reminder sent, the owner role refused, a missing setting named,
   SIGTERM while sleeping: exit 0 at once; all five fail when the bundle leaves its packages external); leaving an
@@ -267,8 +267,9 @@ applications (nothing of this project running). Image numbers from CI (GitHub's 
   another demotes them, 5 rounds, without a deadlock; with `leave` taken out of `changesMemberships` it fails with
   40P01; two owners leaving at once leave one); the role matrix and the isolation suite cover the new action; `npm
   start`'s env files and `PORT` (`tests/unit/start-env.test.ts`, `tests/review-d5r3/`); the CI worker step's own
-  lines, both ways (`tests/review-d5r2/`); e2e: a member leaves in a second browser and gets a 404 afterwards, the
-  only owner is refused.
+  lines, both ways (`tests/review-d5r2/`); the Kubernetes Job's name and image tags against the version
+  (`tests/unit/k8s-release.test.ts`); e2e: a member leaves in a second browser and gets a 404 afterwards, the only
+  owner is refused.
 - **The images** (CI, "container image" job, `docker image ls`): web and worker 289 MB each (they share every
   layer). The migrate image, one optimization at a time: **1.3 GB** at `0637ec2` (built on the full install, with
   TypeScript, ESLint, Playwright and Vitest), **943 MB** at `2cc9225` (its own `npm ci --omit=dev`), **780 MB** at
@@ -293,7 +294,8 @@ applications (nothing of this project running). Image numbers from CI (GitHub's 
   pass.
 - **`deploy/k8s` on kind** (CI, "kubernetes (kind)" job at `227bb33`, kind 0.33.0, Kubernetes 1.37): a throwaway
   Postgres ran the setup script; the migration Job completed (`All migrations have been successfully applied`); web
-  and worker rolled out, web only once its readiness probe on `/api/health` passed; through the Service, `/api/health`
+  and worker rolled out, web only once its readiness probe on `/api/health` passed; through `kubectl port-forward` to
+  the Service (its selector and port; port-forward connects to one pod, not through kube-proxy), `/api/health`
   answered `{"status":"ok"}` and `/signin` 200; the worker logged a reminders pass; a rolling restart replaced the web
   pod. All on the first run, with a read-only root filesystem.
 - **Two release steps at once:** two `prisma migrate deploy` started together against a fresh database: one applied
@@ -523,7 +525,16 @@ read-only root filesystem for every pod and the migrate Job didn't have one; ser
 pods that never call the API; the compose file's header showed commands that fail without `AUTH_SECRET`; two
 generated CI secrets were written to `$GITHUB_ENV` unmasked; and three CI checks could fall through (health through
 the Service printed but not asserted, the long-running worker's pass, the rolling restart). Per round: 0 proven (six
-suspicions, all real), 3, 1, and 7 from the reading review.
+suspicions, all real), 3, 1, and 0 proven by the reading review (seven findings, all fixed).
+
+A fifth agent at `179b030` read round 4's fixes: no security bug, six findings, fixed in the commit after it. CI's check
+of the migration's log could read a failed attempt's pod after a retry (`kubectl logs job/...` picks the oldest), so
+it now reads the succeeded pod's; removing the Job's deadline also removed the only limit on a pod that never starts
+(a missing Secret key, a wrong tag), now documented with the timeout and "delete the Job before fixing the cause";
+nothing checked that a release renames the Job with its tags, so `tests/unit/k8s-release.test.ts` now requires the
+Job's name and all three tags to match `package.json`'s version (a fixed name or a stray tag fails it); and three
+claims were too strong: DESIGN gave the worker a `/tmp` it doesn't have, my round-4 count called reading findings
+"proven", and the `Recreate` advice in `web.yaml` didn't help mock billing (and was invalid next to `rollingUpdate`).
 
 Checked and found by my own work: the e2e suite had only ever run against a standalone server inside the repository,
 where Node can fall back to the project's own `node_modules`; copied outside it, it still passed all 24, which is what
