@@ -17,6 +17,7 @@ const securityHeaders = [
 const nextConfig: NextConfig = {
   // No "Powered by Next.js" header: it only tells an attacker what to look up.
   poweredByHeader: false,
+  output: "standalone",
   // pg and the Prisma driver adapter are Node packages; keep them out of the server bundle.
   serverExternalPackages: ["pg", "@prisma/adapter-pg"],
   async headers() {

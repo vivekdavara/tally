@@ -155,14 +155,15 @@ Overdue reminders come from the worker, a separate process: `npm run worker` run
 cron). It writes each email to stdout as a JSON line: Tally ships no email provider. Several workers can run at once.
 
 For production mode locally, `npm run build && AUTH_TRUST_HOST=true npm start` (Auth.js wants the trusted host stated
-outside development). The server checks at startup that its database role is bound by row-level security and exits
+outside development). The build is Next.js's standalone output, `.next/standalone/server.js` with only the packages it
+uses, which is also what the container image runs (see Deployment). The server checks at startup that its database role is bound by row-level security and exits
 if it isn't, so a `DATABASE_URL` pointing at `tally_owner` or a superuser won't start.
 
 Checks:
 
 ```bash
 npm run check                       # typecheck, lint, unit + integration tests (needs Postgres)
-npm run build && npm run e2e        # Playwright against next start on :8117, database tally_e2e
+npm run build && npm run e2e        # Playwright against the standalone server on :8117, database tally_e2e
 scripts/db-setup.sh tally_bench && npm run bench && npm run bench:signin && npm run bench:finalize && npm run bench:webhook && npm run bench:reminders
 npx tsx scripts/sample-pdf.ts .scratch/pdf   # writes sample PDFs (synthetic invoices)
 ```
