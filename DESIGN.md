@@ -249,6 +249,7 @@ user's id (`sub`).
 | Finalize, void, mark paid, create payment links | yes | yes | no |
 | Invite and remove members, change roles (below owner) | yes | yes | no |
 | Make, change or remove an owner | yes | no | no |
+| Leave the organization (not its last owner) | yes | yes | yes |
 
 D1 stored the role; D4 enforces this table. Each row is one or more named permissions in
 `src/server/orgs/permissions.ts` (`tests/unit/permissions.test.ts` checks the two agree, cell by cell), and every
@@ -289,6 +290,11 @@ members and create invitation links (`src/server/orgs/members.ts`, actions in `s
   target's `FOR UPDATE`: two admins changing each other would each hold one and wait for the other (40P01, the first
   version). Transactions for the member-management permissions take the organization's advisory lock *before* the
   actor's row, so they take turns.
+- **Leaving** (day 5): any member may leave from the members page (`leave`, every role), and lands on their list of
+  organizations; the last owner is refused by the same trigger. Leaving changes a membership, so its transaction
+  takes the advisory lock first too (`changesMemberships` in `permissions.ts` names the three permissions that do).
+  Without it, an owner leaving while another owner demotes them deadlocks (40P01), which
+  `tests/integration/leave.test.ts` shows when `leave` is taken out of that list; two owners leaving at once leave one.
 - **Invitation links** are `/invite/<organization id>.<secret>`, the secret 32 random bytes (base64url). Only its
   SHA-256 is stored, unique per organization, and it's looked up under the organization the link names
   (`runForInvitation`, the data access layer's third way in, after `requireTenant` and the webhook's): another

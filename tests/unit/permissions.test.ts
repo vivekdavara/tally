@@ -3,7 +3,7 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { allows, PERMISSIONS, permissionToRemove, permissionToSetRole, type Permission } from "@/server/orgs/permissions";
+import { allows, changesMemberships, PERMISSIONS, permissionToRemove, permissionToSetRole, type Permission } from "@/server/orgs/permissions";
 
 // DESIGN.md's rows, and the permissions each row stands for.
 const ROWS: { row: string; permissions: Permission[]; owner: boolean; admin: boolean; member: boolean }[] = [
@@ -12,6 +12,7 @@ const ROWS: { row: string; permissions: Permission[]; owner: boolean; admin: boo
   { row: "Finalize, void, mark paid, create payment links", permissions: ["finalize", "void", "mark-paid", "collect-payment"], owner: true, admin: true, member: false },
   { row: "Invite and remove members, change roles (below owner)", permissions: ["manage-members"], owner: true, admin: true, member: false },
   { row: "Make, change or remove an owner", permissions: ["manage-owners"], owner: true, admin: false, member: false },
+  { row: "Leave the organization (not its last owner)", permissions: ["leave"], owner: true, admin: true, member: true },
 ];
 
 describe("the roles table", () => {
@@ -45,5 +46,10 @@ describe("the roles table", () => {
     expect(permissionToRemove("OWNER")).toBe("manage-owners");
     expect(permissionToRemove("ADMIN")).toBe("manage-members");
     expect(permissionToRemove("MEMBER")).toBe("manage-members");
+  });
+
+  it("serializes exactly the permissions that change memberships", () => {
+    const serialized = (Object.keys(PERMISSIONS) as Permission[]).filter(changesMemberships).sort();
+    expect(serialized).toEqual(["leave", "manage-members", "manage-owners"]);
   });
 });

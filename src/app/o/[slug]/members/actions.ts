@@ -1,18 +1,19 @@
 "use server";
 
 import { revalidatePath } from "next/cache";
+import { redirect } from "next/navigation";
 import { z } from "zod";
 import { email } from "@/server/auth/schemas";
 import { billing } from "@/server/billing/runtime";
 import { requireTenant } from "@/server/dal";
 import { refusals } from "@/server/invoices/service";
-import { changeRole, invite, removeMember, revokeInvitation } from "@/server/orgs/members";
+import { changeRole, invite, leaveOrganization, removeMember, revokeInvitation } from "@/server/orgs/members";
 import type { FormState } from "../../../actions";
 import { guard } from "../guard";
 
 // Server Actions for the members page (DESIGN.md, "Members and invitations"). Each needs "manage-members"
-// (owners and admins); the services refuse what only an owner may do, against the role locked in run's
-// transaction, and the database refuses leaving an organization without an owner.
+// (owners and admins), except leaving, which anyone may; the services refuse what only an owner may do, against the
+// role locked in run's transaction, and the database refuses leaving an organization without an owner.
 
 const MESSAGES: Record<string, string> = {
   forbidden: "Only an owner can make, change or remove an owner.",
@@ -73,4 +74,16 @@ export async function revokeInvitationAction(slug: string, id: string): Promise<
     revalidatePath(`/o/${slug}/members`);
     return {};
   });
+}
+
+/** The signed-in member leaves the organization, then lands on their list of organizations. */
+export async function leaveOrganizationAction(slug: string): Promise<FormState> {
+  const state = await guard(async () => {
+    const { run, user } = await requireTenant(slug, "leave");
+    const result = await refusals(() => run((tx) => leaveOrganization(tx, user.id)));
+    return result.ok ? {} : message(result);
+  });
+  if (state.error) return state;
+  revalidatePath("/o");
+  redirect("/o");
 }

@@ -5,7 +5,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import type { Role } from "@/generated/prisma/client";
 import { invite } from "@/server/orgs/members";
 import { allows, Forbidden, type Permission } from "@/server/orgs/permissions";
-import { addMember, db, draft, formData, openInvoice, outcome, person, sessions, signInAs, world, type Outcome, type World } from "../fixtures/org";
+import { addMember, db, draft, formData, openInvoice, outcome, person, sessions, signInAs, world, type Outcome, type Person, type World } from "../fixtures/org";
 import { ownerDb } from "../helpers";
 
 vi.mock("@/auth", () => ({ auth: async () => sessions.current }));
@@ -37,7 +37,9 @@ interface Case {
   /** The refusal a role gets when it passes the action's first check but not the service's rank rule. */
   rankRefusal?: string;
   /** Makes what the action works on; returns the action call and a probe of the state it changes. */
-  prepare(): Promise<{ call: () => Promise<unknown>; probe: () => Promise<unknown> }>;
+  prepare?(): Promise<{ call: () => Promise<unknown>; probe: () => Promise<unknown> }>;
+  /** Instead of prepare, for an action on the caller themselves: a new member with `role` to make the call as. */
+  prepareAs?(role: Role): Promise<{ actor: Person; call: () => Promise<unknown>; probe: () => Promise<unknown> }>;
 }
 
 const invoiceStatus = (id: string) => w.run((tx) => tx.invoice.findUnique({ where: { id }, select: { status: true } }));
@@ -249,6 +251,15 @@ CASES.push(
       return { call: () => memberActions.revokeInvitationAction(w.slug, id), probe: () => openInvitations(email) };
     },
   },
+  {
+    action: "leaveOrganizationAction",
+    permission: "leave",
+    // Leaving removes the caller, so each role's case is a new member with that role (an owner here isn't the last).
+    async prepareAs(role) {
+      const p = await newcomer(role);
+      return { actor: p, call: () => memberActions.leaveOrganizationAction(w.slug), probe: () => roleIn(p.userId) };
+    },
+  },
 );
 
 const succeeded = (o: Outcome) => "redirect" in o || ("state" in o && !o.state.error && !o.state.fieldErrors);
@@ -266,9 +277,9 @@ describe("every Server Action of /o/[slug]", () => {
     for (const role of ["OWNER", "ADMIN", "MEMBER"] as const) {
       const expected = allows(role, c.permission);
       it(`${c.action}${c.variant ? ` (${c.variant})` : ""} as ${role.toLowerCase()}: ${expected ? "allowed" : "refused"}`, async () => {
-        const { call, probe } = await c.prepare();
+        const { call, probe, actor } = c.prepareAs ? await c.prepareAs(role) : { ...(await c.prepare!()), actor: ROLE_OF(role) };
         const before = await probe();
-        signInAs(ROLE_OF(role));
+        signInAs(actor);
         const result = await outcome(call());
         const after = await probe();
         if (expected) {

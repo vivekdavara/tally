@@ -247,6 +247,7 @@ const ACTIONS: Record<string, Record<string, ActionProbe>> = {
     changeRoleAction: { withIds: async (slug) => (await tenantActions()).changeRoleAction(slug, A.member.userId, {}, formData({ role: "OWNER" })) },
     removeMemberAction: { withIds: async (slug) => (await tenantActions()).removeMemberAction(slug, A.owner.userId) },
     revokeInvitationAction: { withIds: async (slug) => (await tenantActions()).revokeInvitationAction(slug, a.invitationId) },
+    leaveOrganizationAction: { slugOnly: async () => (await tenantActions()).leaveOrganizationAction(A.slug) },
   },
   "invite/[token]/actions.ts": {
     acceptInvitationAction: {

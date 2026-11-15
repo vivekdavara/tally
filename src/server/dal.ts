@@ -6,7 +6,7 @@ import { db } from "./db/client";
 import { withTenant, type TenantTx } from "./db/tenant";
 import { findMembership, type MembershipView } from "./orgs/memberships";
 import type { InvitationLink } from "./orgs/members";
-import { allows, Forbidden, type Permission } from "./orgs/permissions";
+import { allows, changesMemberships, Forbidden, type Permission } from "./orgs/permissions";
 import { lockedRole, serializeMembershipChanges } from "./orgs/locked-role";
 
 // The data access layer (DESIGN.md, "Layer 1"). Every page and Server Action that touches tenant data
@@ -85,7 +85,7 @@ export async function requireTenant(slug: string, permission: Permission): Promi
     can: (p) => allows(membership.role, p),
     run: (fn) =>
       withTenant(organizationId, async (tx) => {
-        if (permission === "manage-members" || permission === "manage-owners") await serializeMembershipChanges(tx);
+        if (changesMemberships(permission)) await serializeMembershipChanges(tx);
         const role = await lockedRole(tx, userId);
         if (!role) notFound();
         if (!allows(role, permission)) throw new Forbidden(permission, role);

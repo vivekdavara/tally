@@ -86,6 +86,17 @@ export async function removeMember(tx: TenantTx, actorId: string, userId: string
   return ok(undefined);
 }
 
+/**
+ * The acting member leaves the organization. Anyone may; the database refuses it for the last owner ("last-owner"),
+ * exactly as when someone else removes them. Runs under requireTenant(slug, "leave"), which took the organization's
+ * membership lock before the actor's own row, like every other membership change.
+ */
+export async function leaveOrganization(tx: TenantTx, actorId: string): Promise<Result> {
+  await actorRole(tx, actorId);
+  await tx.$executeRawUnsafe(`DELETE FROM memberships WHERE organization_id = ${TENANT} AND user_id = $1::uuid`, actorId);
+  return ok(undefined);
+}
+
 // Invitation links ---------------------------------------------------------------------------------------------
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;

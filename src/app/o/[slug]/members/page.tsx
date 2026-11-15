@@ -3,7 +3,7 @@ import { requireMembership, requireTenant } from "@/server/dal";
 import { formatDate } from "@/server/invoices/format";
 import { listMembers, listOpenInvitations } from "@/server/orgs/members";
 import { ActionForm } from "../../../components/action-form";
-import { changeRoleAction, inviteAction, removeMemberAction, revokeInvitationAction } from "./actions";
+import { changeRoleAction, inviteAction, leaveOrganizationAction, removeMemberAction, revokeInvitationAction } from "./actions";
 
 const ROLE_OPTIONS = [
   { value: "MEMBER", label: "Member" },
@@ -119,6 +119,10 @@ export default async function MembersPage({ params }: { params: Promise<{ slug: 
           An owner or an admin invites people and changes roles.
         </p>
       )}
+
+      <h2>Leave {organization.name}</h2>
+      <p className="muted">You lose access at once; an owner or an admin can invite you again. An organization&apos;s last owner can&apos;t leave.</p>
+      <ActionForm action={leaveOrganizationAction.bind(null, slug)} testId="leave" submit="Leave organization" pending="Leaving…" danger />
     </section>
   );
 }

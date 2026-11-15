@@ -27,6 +27,8 @@ export const PERMISSIONS = {
   "manage-members": MANAGERS,
   /** Make someone an owner, or change or remove an owner. */
   "manage-owners": OWNERS,
+  /** Leave the organization: anyone, except that the database refuses its last owner. */
+  leave: EVERYONE,
 } as const satisfies Record<string, readonly Role[]>;
 
 export type Permission = keyof typeof PERMISSIONS;
@@ -48,6 +50,14 @@ export function permissionToSetRole(from: Role | null, to: Role): Permission {
 /** The permission needed to remove a member who has `role`. */
 export function permissionToRemove(role: Role): Permission {
   return role === "OWNER" ? "manage-owners" : "manage-members";
+}
+
+/**
+ * The permissions whose actions change memberships. requireTenant's run takes the organization's membership lock
+ * for these before anything else (serializeMembershipChanges), so they take turns instead of deadlocking.
+ */
+export function changesMemberships(permission: Permission): boolean {
+  return permission === "manage-members" || permission === "manage-owners" || permission === "leave";
 }
 
 /** Thrown by requireTenant when the member's role lacks the permission. */
