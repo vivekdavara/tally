@@ -16,9 +16,10 @@ Stripe's test mode opt-in), signed webhooks processed exactly once, the payment 
 Day 4: roles enforced on every page and action (and checked again inside the transaction); members and invitation
 links, with the last owner kept by the database; a background worker that sends overdue reminders exactly once per
 stage; a tenant-isolation suite across every route and Server Action. Day 5: deploy-ready, not deployed: container
-images for the web server, the worker and the release step, checked in CI by running the browser tests against the
-web container; members can leave. [DESIGN.md](DESIGN.md) is the specification; [WALKTHROUGH.md](WALKTHROUGH.md)
-answers the questions an interviewer is likely to ask; [CHANGELOG.md](CHANGELOG.md) lists what 1.0.0 contains.
+images for the web server, the worker and the release step, `compose.yaml` and Kubernetes manifests, all checked in CI
+(the browser tests against the web container, the manifests on a kind cluster); members can leave.
+[DESIGN.md](DESIGN.md) is the specification; [WALKTHROUGH.md](WALKTHROUGH.md) answers the questions an interviewer is
+likely to ask; [CHANGELOG.md](CHANGELOG.md) lists what 1.0.0 contains.
 
 ## Results at v1.0.0
 
@@ -35,7 +36,7 @@ The headline numbers, each from the day's section below, where the conditions an
 | Overdue reminders | about 1,300 reminders/s with one worker, more with two | `npm run bench:reminders` (4) |
 | The role re-check inside the transaction | about 150 µs per page or action | `npm run bench:reminders` (4) |
 | Server start | healthy (startup check passed) in a median 318 / 315 ms; 187 MiB resident after 200 page renders; SIGTERM to exit 4 to 5 ms | `npm run bench:startup` (5) |
-| Images | web and worker 289 MB, migrate 780 MB (from 1.3 GB); web healthy about 7 s after `docker run`; `docker stop` under 0.1 s, handled | CI "container image" job (5) |
+| Images | web and worker 289 MB, migrate 780 MB (from 1.3 GB); web healthy about 7 s after `docker run`; `docker stop` under 0.1 s, handled; the same images run by `compose.yaml` and deployed to a kind cluster | CI "container image", "compose", "kubernetes (kind)" jobs (5) |
 | Review rounds | bugs proven per round: day 1: 9, 5; day 2: 4, 7, 3, 2; day 3: 2, 2, 2, 1, 3, 0; day 4: 3, 2; day 5: 0 (six suspicions, all fixed), 3, 1 | README "Review" |
 
 ## Reading order
@@ -46,7 +47,8 @@ The headline numbers, each from the day's section below, where the conditions an
 3. DESIGN.md "Invoices" and `src/server/invoices/money.ts`, `service.ts`; the migration `*_invoicing`.
 4. DESIGN.md "Billing" and `src/server/billing/service.ts`, `webhook.ts`.
 5. DESIGN.md "Roles", "Members and invitations", "Overdue reminders"; `src/server/orgs/`, `src/server/reminders/`.
-6. DESIGN.md "Deployment (day 5)", the `Dockerfile` and CI's "container image" job.
+6. DESIGN.md "Deployment (day 5)", the `Dockerfile`, `compose.yaml`, `deploy/k8s/`, and CI's "container image" and
+   "kubernetes (kind)" jobs.
 7. WALKTHROUGH.md "In two minutes", then the topic you'll be asked about.
 
 ## Why
