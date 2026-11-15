@@ -62,6 +62,7 @@ jobs:
           npm run bench:signin
           BENCH_FINALIZATIONS=50 BENCH_CONCURRENCY=1,4 BENCH_OUT=$RUNNER_TEMP/bench-finalize.json npm run bench:finalize
           BENCH_EVENTS=50 BENCH_CONCURRENCY=1,4 BENCH_OUT=$RUNNER_TEMP/bench-webhook.json npm run bench:webhook
+          BENCH_INVOICES=100 BENCH_RECHECKS=100 BENCH_OUT=$RUNNER_TEMP/bench-reminders.json npm run bench:reminders
 
   e2e:
     name: e2e (chrome)
