@@ -1,8 +1,28 @@
 # Walkthrough: questions about Tally, answered from the code
 
-Day 1 covers the foundation: tenant isolation, the schema, roles, authentication. Day 2 adds invoices: exact money,
-gapless numbering, the life cycle in the database, PDFs. Later days add billing, roles and the full isolation suite,
-and this file grows with them.
+The questions an interviewer is likely to ask, by topic and in the order the project was built: the foundation
+(tenant isolation, the schema, authentication), invoices (exact money, gapless numbering, PDFs), billing (payment
+links, webhooks), roles, members and reminders, and deployment.
+
+## In two minutes
+
+Tally is invoicing for many businesses in one Postgres database. The thing it's built around is that one business
+can never see or change another's data, even when a query in the application forgets to filter: every request runs
+in a transaction that sets the tenant (`withTenant`), and Postgres row-level security, forced on every tenant table
+for a role that can't bypass it, filters and checks every statement. The server refuses to start if its role could
+bypass it.
+
+On top of that, money is exact (integer minor units, one rounding rule in TypeScript and SQL, a differential test
+between them), invoice numbers have no gaps (a counter row locked by the finalizing transaction), and the rules that
+matter are in the database (triggers for the invoice and payment life cycles, the last owner, reminders), so raw SQL
+can't skip them. Payments go through a hosted checkout behind a provider interface (a mock by default, Stripe test
+mode opt-in), and webhooks are verified, then applied once through an inbox table. Roles are checked twice, the
+second time inside the transaction with the member's row locked. A background worker sends overdue reminders exactly
+once per stage. It ships as three container images (web, worker, migrate), and CI runs the browser tests against
+the web container.
+
+Every day had review rounds by a separate agent writing failing tests; they found real bugs every day, often in the
+previous round's fixes (README, "Review").
 
 ## The design
 
@@ -487,11 +507,75 @@ unchanged. I checked it can fail: removing the members list's tenant filter fail
 the user didn't, at first, because `run`'s re-check still produced the 404, so the suite now also probes page titles,
 which use only the first lookup.
 
+## Deployment and v1.0.0 (day 5)
+
+**How would you deploy it?**
+As three containers from one Dockerfile (DESIGN.md, "Deployment"): run the `migrate` image once per release with the
+owner role's URL, then any number of `web` replicas behind the platform's TLS load balancer and one or more `worker`
+replicas, both with the app role's URL. Configuration is environment variables only, secrets from the platform's
+secret store. I didn't deploy it anywhere (the plan said not to); CI is where it's checked: build the images, run the
+release step, start the web image until its health check passes, run all 24 browser tests against it, run the worker
+image, stop both.
+
+**Why three images instead of one?**
+Each gets only what it needs. The web and worker images hold Node, the standalone server and the worker bundle: no
+source, no compiler, no npm install, no migrations. Only the migrate image has the migration files and Prisma's CLI,
+and it's the only thing that ever gets the owner role's credentials, which can change the schema and isn't bound by
+row-level security. If the web server were compromised, the attacker would hold `tally_app`, which the policies bind.
+
+**What's the standalone output, and what did it change?**
+`output: "standalone"` makes `next build` write a `server.js` plus only the `node_modules` files the server actually
+loads (Next.js traces them), 51 MB here. The image copies that instead of the whole install. I made `npm start` and
+Playwright run the same server, so the e2e tests exercise what ships; and I checked it copied outside the repository,
+where Node can't fall back to the project's `node_modules`, before trusting the image. One surprise: the standalone
+build copies the project's `.env` next to `server.js`, so without `.dockerignore` a developer's secrets would end up
+in an image layer. CI checks the image has no `.env` file.
+
+**How does the worker run without TypeScript in the image?**
+esbuild bundles `scripts/worker.ts` (and `reconcile.ts`) into one file with every dependency inside, Prisma's query
+compiler too (it's a base64 JavaScript module, imported with a literal path, which esbuild follows).
+`tests/integration/worker-bundle.test.ts` copies the bundle into a temporary directory with nothing above it and runs
+it: it must send a reminder, refuse the owner role, and exit 0 on SIGTERM. With the packages left external, all five
+of its tests fail.
+
+**What happens if someone starts the new web version before running the migrations?**
+It exits 1. The startup check compares the database with what the code expects (row-level security enabled and
+forced on every tenant table, the policies and grants exactly the migrations'), so the server doesn't run with
+isolation off. CI starts the web image before the release step and checks for exit 1. Two release steps at once are
+safe too: Prisma takes an advisory lock; I ran two at once against a fresh database, one applied all 14 migrations,
+the other waited and found none pending.
+
+**How does it shut down?**
+On SIGTERM (what `docker stop` and Kubernetes send) the web server stops accepting connections, finishes requests in
+flight and exits 143; the worker finishes its current step and exits 0. In CI both stopped in under a tenth of a
+second, with those codes rather than 137 (killed after the 10 s grace period). Node runs as PID 1 in the container,
+which only matters for signals without a handler; both processes install one.
+
+**Can you run several web servers?**
+Yes, in Stripe mode: the server keeps nothing between requests (the session is a signed cookie, everything else is in
+Postgres). The mock payment provider keeps its checkout sessions in the process's memory, so it's single-process by
+nature; it's for development. The limit to watch is connections: 10 per web process, 4 per worker, against
+Postgres's 100 by default.
+
+**Why is the health check a readiness check and not a liveness check?**
+It fails when the database is unreachable. As a liveness check that would restart every replica during a database
+outage, which fixes nothing and adds a thundering herd when it comes back. So it's for taking a replica out of the
+load balancer; liveness should be the TCP port.
+
+**What did you add besides deployment on the last day?**
+Members can leave an organization (the gap day 4 left). The last owner can't, by the same trigger. The interesting
+part was the lock order: leaving deletes a membership, so its transaction must take the organization's membership
+lock before locking the member's own row, like every other membership change. Without that, an owner leaving while
+another owner demotes them deadlocks (40P01): `tests/integration/leave.test.ts` shows it when `leave` is taken out of
+`changesMemberships`.
+
 ## What I'd do next, or differently at scale
 
 - Rate-limit sign-in, and email verification to stop sign-up from revealing accounts.
-- A real email provider behind `Mailer` (one that honours idempotency keys), invitation emails, and a "leave
-  organization" action for members.
+- A real email provider behind `Mailer` (one that honours idempotency keys), and invitation emails.
+- Deploy it for real: TLS, a managed Postgres with passwords and `sslmode=require`, backups, and the add-then-remove
+  rule for migrations exercised by an actual rolling deploy. Give the migrate image a manifest of its own (943 MB
+  today, mostly Next.js it doesn't use).
 - Refunds and partial payments: new payment and invoice states (PAID can't change today), a refund action for
   `refund_due` payments.
 - Process webhooks from a queue: answer 200 as soon as the event is stored, apply it in a worker, as Stripe
