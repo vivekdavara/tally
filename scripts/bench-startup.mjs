@@ -3,7 +3,9 @@
 // spawn to the first 200 from /api/health (which means the startup check passed: database reachable, role bound by
 // row-level security), then BENCH_REQUESTS sign-in page renders and the process's resident memory after them, then
 // the time from SIGTERM to exit and the exit code. BENCH_SERVER=next-start measures `next start` from the full install
-// instead, on the same build, for comparison. Memory is that of the process listening on the port.
+// instead, on the same build, for comparison. Memory is the spawned process's: for both servers it is the one that
+// listens (checked with lsof on this Mac; on CI's Linux runners, where this runs once as a smoke test, the same lsof
+// call found no listener and exited 1, so the script doesn't depend on it).
 //
 //   npm run build && node scripts/bench-startup.mjs
 //   BENCH_DATABASE_URL (default postgresql://tally_app@localhost:5432/tally_e2e: a migrated database), BENCH_PORT
@@ -38,8 +40,6 @@ const env = {
 
 /** Resident set size of a process, in MiB (ps reports KiB). */
 const rssMiB = (pid) => Number(execFileSync("ps", ["-o", "rss=", "-p", String(pid)], { encoding: "utf8" }).trim()) / 1024;
-/** The process listening on the port, which for next start need not be the one spawned. */
-const listener = () => Number(execFileSync("lsof", ["-nP", "-t", `-iTCP:${port}`, "-sTCP:LISTEN"], { encoding: "utf8" }).trim().split("\n")[0]);
 const command = mode === "standalone" ? [server] : ["node_modules/next/dist/bin/next", "start", "--port", String(port), "--hostname", "127.0.0.1"];
 
 async function once() {
@@ -65,18 +65,17 @@ async function once() {
     child.kill("SIGKILL");
     throw new Error(`the server never answered 200 on /api/health: ${stderr.trim()}`);
   }
-  const pid = listener();
-  const rssHealthy = rssMiB(pid);
+  const rssHealthy = rssMiB(child.pid);
   for (let i = 0; i < requests; i++) {
     const response = await fetch(`http://127.0.0.1:${port}/signin`);
     if (response.status !== 200) throw new Error(`/signin answered ${response.status}`);
     await response.arrayBuffer();
   }
-  const rssAfter = rssMiB(pid);
+  const rssAfter = rssMiB(child.pid);
   const stopAt = performance.now();
   child.kill("SIGTERM");
   const { code, signal, at } = await exited;
-  return { healthyMs: Math.round(healthyMs), rssHealthyMiB: Math.round(rssHealthy), rssAfterMiB: Math.round(rssAfter), stopMs: Math.round(at - stopAt), exitCode: code, signal, listenerIsSpawned: pid === child.pid };
+  return { healthyMs: Math.round(healthyMs), rssHealthyMiB: Math.round(rssHealthy), rssAfterMiB: Math.round(rssAfter), stopMs: Math.round(at - stopAt), exitCode: code, signal };
 }
 
 const runs = [];
