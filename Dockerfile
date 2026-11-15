@@ -45,7 +45,7 @@ USER node
 CMD ["node_modules/.bin/prisma", "migrate", "deploy"]
 
 # What the web server and the worker share: Node, the standalone server, the worker bundles, nothing else. No
-# compiler, no npm packages beyond what the server traces, no source, no migrations.
+# compiler, no dependencies beyond what the server traces, no source, no migrations (the base image's own npm aside).
 FROM ${NODE_IMAGE} AS runtime
 WORKDIR /app
 ENV NODE_ENV=production NEXT_TELEMETRY_DISABLED=1

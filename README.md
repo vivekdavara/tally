@@ -8,15 +8,46 @@ another's data, even when the application code has a bug.
 Next.js 16 (App Router, Server Components, Server Actions), Prisma 7 with the `pg` driver adapter, PostgreSQL 14
 row-level security, Auth.js v5, Zod, Vitest, Playwright, TypeScript.
 
-**Status: day 4 of 5.** Day 1: design, scaffold, schema and migrations with row-level security, database roles,
+**Status: v1.0.0, day 5 of 5.** Day 1: design, scaffold, schema and migrations with row-level security, database roles,
 sign-up and sign-in, tests and CI. Day 2: customers; invoices with line items, totals and per-rate taxes in exact
 integer arithmetic; gapless per-organization numbering and the invoice life cycle enforced by the database; invoice
 PDFs. Day 3: billing: payment links for open invoices through a provider interface (a Stripe-like mock by default,
 Stripe's test mode opt-in), signed webhooks processed exactly once, the payment life cycle enforced by the database.
 Day 4: roles enforced on every page and action (and checked again inside the transaction); members and invitation
 links, with the last owner kept by the database; a background worker that sends overdue reminders exactly once per
-stage; a tenant-isolation suite across every route and Server Action. [DESIGN.md](DESIGN.md) is the specification;
-[WALKTHROUGH.md](WALKTHROUGH.md) answers the questions an interviewer is likely to ask.
+stage; a tenant-isolation suite across every route and Server Action. Day 5: deploy-ready, not deployed: container
+images for the web server, the worker and the release step, checked in CI by running the browser tests against the
+web container; members can leave. [DESIGN.md](DESIGN.md) is the specification; [WALKTHROUGH.md](WALKTHROUGH.md)
+answers the questions an interviewer is likely to ask; [CHANGELOG.md](CHANGELOG.md) lists what 1.0.0 contains.
+
+## Results at v1.0.0
+
+The headline numbers, each from the day's section below, where the conditions and caveats are. Apple M3 laptop
+(macOS 26.6, Node 23.11, Postgres 14.20) unless it says CI; synthetic data throughout.
+
+| What | Result | Command (day) |
+|---|---|---|
+| Tests | 710 Vitest tests in 80 files, 24 Playwright tests, all passing; the 24 also pass against the web container in CI | `npm run check`, `npm run e2e` (5) |
+| Cost of tenant isolation per request | p50 914 µs through `withTenant` vs 409 µs for one bare query: four extra round trips, not the policy | `npm run bench` (1) |
+| Sign-in timing | 49.6 ms at the median for a wrong password, an unknown email and the right password alike | `npm run bench:signin` (1) |
+| Gapless numbering under contention | 16 concurrent finalizers: p95 23.5 ms in one organization vs 8.3 ms spread over many | `npm run bench:finalize` (2) |
+| Webhook processing | 1.54 ms per fresh event alone; about 1,570 events/s at 8 workers; a redelivery 0.73 ms | `npm run bench:webhook` (3) |
+| Overdue reminders | about 1,300 reminders/s with one worker, more with two | `npm run bench:reminders` (4) |
+| The role re-check inside the transaction | about 150 µs per page or action | `npm run bench:reminders` (4) |
+| Server start | healthy (startup check passed) in a median 318 / 315 ms; 187 MiB resident after 200 page renders; SIGTERM to exit 4 to 5 ms | `npm run bench:startup` (5) |
+| Images | web and worker 289 MB, migrate 943 MB (from 1.3 GB); web healthy about 7 s after `docker run`; `docker stop` under 0.1 s, handled | CI "container image" job (5) |
+| Review rounds | bugs proven per round: day 1: 9, 5; day 2: 4, 7, 3, 2; day 3: 2, 2, 2, 1, 3, 0; day 4: 3, 2; day 5: 0 (six suspicions, all fixed) | README "Review" |
+
+## Reading order
+
+1. This file's "Why" and DESIGN.md's "Tenant isolation": the property everything rests on.
+2. `src/server/db/tenant.ts` (`withTenant`), `src/server/dal.ts` (`requireTenant`), `src/server/db/role-check.ts`, and
+   the migration `*_row_level_security`.
+3. DESIGN.md "Invoices" and `src/server/invoices/money.ts`, `service.ts`; the migration `*_invoicing`.
+4. DESIGN.md "Billing" and `src/server/billing/service.ts`, `webhook.ts`.
+5. DESIGN.md "Roles", "Members and invitations", "Overdue reminders"; `src/server/orgs/`, `src/server/reminders/`.
+6. DESIGN.md "Deployment (day 5)", the `Dockerfile` and CI's "container image" job.
+7. WALKTHROUGH.md "In two minutes", then the topic you'll be asked about.
 
 ## Why
 
@@ -111,6 +142,10 @@ scripts/stripe-smoke.ts          checks the Stripe client against Stripe's test 
 scripts/reconcile.ts             replays Stripe's events of the last N hours (lost webhook deliveries)
 scripts/worker.ts                the background worker: overdue reminders hourly (+ reconciliation in Stripe mode)
 scripts/bench-reminders.ts       the reminders job's throughput; what the role re-check costs
+scripts/build-worker.mjs         bundles the worker and reconcile commands into dist/ (esbuild), for the image
+scripts/bench-startup.mjs        the production server's time to healthy, memory and stop time
+Dockerfile, .dockerignore        the web, worker and migrate images
+CHANGELOG.md                     what 1.0.0 contains
 src/server/db/tenant.ts          withTenant
 src/server/db/role-check.ts      assertSafeAppRole: is RLS binding this connection?
 src/server/auth/                 passwords (scrypt), Zod schemas, credentials, sign-up
@@ -170,6 +205,62 @@ npx tsx scripts/sample-pdf.ts .scratch/pdf   # writes sample PDFs (synthetic inv
 
 On Node 23 (this Mac's), Prisma's preinstall refuses to run; `npm ci --ignore-scripts && npx prisma generate` works,
 and everything else runs.
+
+## Deployment
+
+Ready to deploy, not deployed (DESIGN.md, "Deployment (day 5)"). One Dockerfile builds three images:
+
+```bash
+docker build -t tally-web .                          # the web server (Next.js standalone), port 8117
+docker build --target worker -t tally-worker .       # overdue reminders (+ reconciliation in Stripe mode)
+docker build --target migrate -t tally-migrate .     # the release step: prisma migrate deploy
+```
+
+A release runs the migrate image once with the owner role, then the web and worker images with the app role:
+
+```bash
+docker run --rm -e MIGRATE_DATABASE_URL=postgresql://tally_owner:...@db/tally tally-migrate
+docker run -d -p 8117:8117 -e DATABASE_URL=postgresql://tally_app:...@db/tally -e AUTH_SECRET=... \
+  -e AUTH_TRUST_HOST=true -e BILLING_PROVIDER=stripe -e STRIPE_SECRET_KEY=... -e STRIPE_WEBHOOK_SECRET=... \
+  -e APP_BASE_URL=https://... tally-web
+docker run -d -e DATABASE_URL=postgresql://tally_app:...@db/tally -e BILLING_PROVIDER=stripe ... tally-worker
+```
+
+The database roles come first, once (`scripts/db-setup.sh`, or its SQL by hand on a managed Postgres, with passwords).
+The images run as an unprivileged user and hold no secrets; the web image has a health check on `/api/health`; both
+processes stop cleanly on SIGTERM. Docker isn't installed on the machine this was built on, so the images are built
+and tested only in CI: the "container image" job builds all three, checks the web image refuses to start before the
+migrations and as the owner role, runs the release step, waits for the web container to be healthy (also on another
+`PORT`), runs the 24 Playwright tests against it (`E2E_EXTERNAL_SERVER=1`), runs a worker pass, and checks
+`docker stop` is handled, not killed. What a platform still provides: TLS, an email provider, backups, log collection.
+
+## Results (day 5)
+
+Apple M3 laptop (macOS 26.6.2, Node 23.11, Postgres 14.20), on battery, load average 3.4 to 3.9 from other
+applications (nothing of this project running). Image numbers from CI (GitHub's ubuntu-24.04 runners).
+
+- **Tests:** 710 Vitest tests in 80 files (`npm run check`, 51.9 s, files one at a time), 16 of them new today; 24
+  Playwright tests (`npm run e2e`, 20.5 s), now run against the standalone server. New: the worker bundle run from a
+  directory with no `node_modules` above it (a reminder sent, the owner role refused, a missing setting named, SIGTERM
+  while sleeping: exit 0 at once; all five fail when the bundle leaves its packages external); leaving an organization
+  (`tests/integration/leave.test.ts`: the 404 afterwards, the last owner refused, an owner leaving while another
+  demotes them, 5 rounds, without a deadlock; with `leave` taken out of `changesMemberships` it fails with 40P01; two
+  owners leaving at once leave one); the role matrix and the isolation suite cover the new action.
+- **The images** (CI, "container image" job at `2cc9225`): web and worker 289 MB each (they share every layer);
+  migrate 943 MB. The migrate image was 1.3 GB at `0637ec2`, built on the full install with TypeScript, ESLint,
+  Playwright and Vitest; it now has its own production-only install. In both runs (`0637ec2`, `2cc9225`) the web
+  container was healthy about 7 s after `docker run` (Docker's first health check), passed all 24 e2e tests (25.9 s,
+  39.8 s), and `docker stop` took 0.07 / 0.09 s for the web container (exit 143, Next.js's handler) and 0.06 / 0.07 s
+  for the worker (exit 0): handled, not killed after 10 s. No `.env` file in the images.
+- **The artifacts:** `.next/standalone` is 61 MB, of which 55 MB `node_modules`, against 837 MB for the full install
+  (`du -sh`); the worker and reconcile bundles are 6.1 MB each (`ls -l dist`).
+- **Server start** (`npm run bench:startup` at `a1272a5`, run twice, 5 starts each, 200 sign-in page renders per
+  start): healthy (the first 200 from `/api/health`, so the startup check against the database had passed) in a
+  median of **318 / 315 ms** (the first start of the first run 408 ms, the rest 315 to 325 ms); 141 MiB resident when
+  healthy, 187 to 188 MiB after the 200 renders; SIGTERM to exit **4 to 5 ms**, exit 143.
+- **Two release steps at once:** two `prisma migrate deploy` started together against a fresh database: one applied
+  all 14 migrations, the other waited on Prisma's advisory lock and found none pending; both exited 0, 14 rows in
+  `_prisma_migrations`, none unfinished.
 
 ## Results (day 4)
 
@@ -343,6 +434,31 @@ All measured on an Apple M3 laptop (macOS 26.6.2, Node 23.11, Postgres 14.20), o
   49.7 ms for a wrong password: a timing oracle for which emails are registered.
 
 ## Review
+
+### Day 5
+
+A review agent at `2cc9225` (the standalone build, the worker bundle, the Dockerfile and CI job, leaving), in its own
+worktree and database, about 5 minutes: **no bug it could prove with a test**. It built the project with an empty
+environment as the image's build stage does, ran the standalone server and the leave and bundle tests, and checked
+leaving against invitations, removals and the last-owner trigger. Its six suspicions, each checked here and fixed in
+`a1272a5`:
+
+- **`npm start` read a copy of `.env` taken at build time.** `next build` copies `.env` into `.next/standalone`
+  (`cmp` showed it, `AUTH_SECRET` included), and the standalone server loads it from there, so an edited `.env` was
+  ignored until the next build. The build now deletes the copies and `npm start` passes the project's `.env` with
+  `node --env-file-if-exists`.
+- **`.dockerignore` matched `.env` at the root only;** `**/.env*` catches one anywhere, and CI looks in all three
+  images.
+- **The health check called port 8117 whatever `PORT` said;** it follows `PORT` now, and CI checks a container on 8119.
+- **`.next/cache` belonged to root,** so the server couldn't write Next.js's cache as `node`; it's created for `node`.
+- **`npm start` didn't set `HOSTNAME`,** which the standalone server binds to when it is exported; it sets `0.0.0.0`.
+- **CI's worker pass checked only the exit code;** it now requires the job's and the stop's log lines.
+
+Checked and found by my own work: the e2e suite had only ever run against a standalone server inside the
+repository, where Node can fall back to the project's own `node_modules`; copied outside it, it still passed all 24,
+which is what the image relies on. The image job's first run failed on my own check (`find /` as the unprivileged user exits non-zero under
+`bash -e`), not on the images. A lock file regenerated with this Mac's npm 10.9.2 dropped the `libc` markers of
+unrelated packages; the change was redone with npm 11.21.1, which made the lock file.
 
 ### Day 4
 
@@ -540,6 +656,32 @@ finding as a failing test (`tests/review/`).
   returns after verification; row security still checks the session belongs to that organization.
 - **Money is never thrown away:** statuses only move forward, late successes count, and money nobody wants is flagged
   for a refund rather than paying the wrong thing.
+- **Three images from one Dockerfile, not one image with three commands.** Only the migrate image holds the
+  migrations, the migration tool and, at run time, the owner role's credentials; the web and worker images hold no
+  source, compiler or development dependencies. A compromised web server has `tally_app`, which the policies bind.
+- **The standalone server everywhere.** `npm start`, the e2e suite and the image all run `.next/standalone/server.js`,
+  so the browser tests test what ships; the CI job then runs the same tests against the container itself.
+- **The worker bundled, not run with tsx in production.** One file with its dependencies inside, so the runtime image
+  needs no TypeScript runner and no `node_modules` of its own; a test runs the bundle where nothing could resolve a
+  missing import.
+- **Refuse to start rather than document an order.** The release order (migrations first) holds because the server's
+  startup check exits when the policies aren't there, not because a runbook says so.
+
+## Limitations (v1.0.0)
+
+- **Not deployed.** The images are built and tested in CI only (no Docker on the machine this was built on), never on
+  a platform: TLS, database passwords with `sslmode`, backups and log collection are the platform's, and the rule
+  that a migration must keep working for the previous version during a rolling deploy is stated, not exercised.
+- **No email is sent.** Invitation links are shown to the inviter; reminders go to a mailer that prints (the worker)
+  or keeps messages in memory (tests). A real provider plugs in behind `Mailer`.
+- **The mock payment provider is per process** (its checkout sessions live in memory), so more than one web replica
+  needs Stripe mode.
+- **The migrate image is 943 MB,** mostly Next.js and React it never runs; a manifest of its own would cut it.
+- Organizations can't be renamed or deleted from the app, and an issued invoice's letterhead shows the organization's
+  current name (only the bill-to is snapshotted; nothing can rename one yet).
+- An invoice paid between a reminder's claim and its send still gets that reminder.
+- Sign-up always creates an organization, so an invited person has one of their own before accepting.
+- Rate limiting sign-in is still not done.
 
 ## Limitations (day 4)
 
