@@ -413,11 +413,85 @@ off; CI runs in UTC and would never have shown it. Every connection now runs in 
 York time (`tests/integration/timezone.test.ts`). And a deadlock between two events for one payment: the inbox
 insert's foreign-key check holds `FOR KEY SHARE` on the payment, which my `FOR UPDATE` conflicted with.
 
+## Roles, members and reminders (day 4)
+
+**How are roles enforced?**
+Every page and Server Action calls `requireTenant(slug, permission)` (`src/server/dal.ts`); the permission is a
+required argument, so there's no way to forget it. `src/server/orgs/permissions.ts` is the roles table (a member can
+edit drafts; finalize, void, mark paid and payment links need an admin or owner; anything about owners needs an
+owner), and `tests/unit/permissions.test.ts` checks it against DESIGN.md's table cell by cell. A role without the
+permission gets `Forbidden`, which `guard` turns into the form's error. `tests/integration/roles.test.ts` calls every
+action as each role and checks the effect or the refusal, and fails if an action has no case.
+
+**Why check the role twice?**
+The first check (from `requireMembership`) happens before any data is read, so a member never even loads a page's data
+for an action they can't take. But a page does work between that check and its write, and an owner could demote the
+member in between. So `run` re-reads the role as the first statement of its transaction, `FOR SHARE`: the write is
+made under the role as it is *now*, and a role change, which needs the row's update lock, waits until the action's
+transaction ends. Cost: about 150 µs per page or action (`npm run bench:reminders`, README "Results (day 4)").
+
+**What stops an organization from losing its last owner?**
+A trigger, `memberships_guard`, for every writer. It takes an advisory lock per organization, so two owners demoting
+each other take turns, then locks the other owners' rows `FOR SHARE` and refuses if none is left. The review found the
+first version's gap: it read the other owners with a plain `SELECT`, and a raw-SQL writer under REPEATABLE READ (whose
+snapshot predates the other demotion) got a stale "yes": zero owners (`tests/review-d4/last-owner-repeatable-read.test.ts`).
+Locking makes that a serialization failure. Deleting a user or organization as an administrator cascades through
+(`pg_trigger_depth() > 1`).
+
+**Why did changing roles deadlock, and how did you fix it?**
+`run` holds the actor's own membership row `FOR SHARE`; `changeRole` locks the target `FOR UPDATE`. Admins A and B
+changing each other: A holds A, wants B; B holds B, wants A (40P01, caught by my concurrency test). Member-management
+transactions now take the organization's advisory lock *before* any row lock, so they queue instead
+(`serializeMembershipChanges` in `src/server/orgs/locked-role.ts`).
+
+**How do invitation links work without a tenant?**
+The link is `/invite/<organization id>.<32 random bytes>`. Only the SHA-256 of the secret is stored, so a database leak
+doesn't leak working links. The page parses the link (`parseInvitationLink`, a branded type), opens a transaction in
+the organization the link names (`runForInvitation`), and looks the digest up under that organization's row security:
+another organization's id finds nothing, and the unique key is (organization_id, token_hash), so it can't answer
+"exists elsewhere" either. Accepting needs the signed-in user's email to be the invited one, and works once, within
+seven days (the trigger refuses an expired one too).
+
+**How does the reminders job avoid sending twice?**
+Three things. One reminder per (invoice, stage) can ever exist (a unique key, `ON CONFLICT DO NOTHING`). Sending is
+claim, send, record: the claim counts the attempt and pushes `next_attempt_at` five minutes out in a committed
+transaction, so no other worker takes it; recording sets `sent_at` once (the trigger refuses a second). And a crash
+between sending and recording leaves a claim that lapses and is retried with the same idempotency key (the reminder's
+id), which a real provider uses to drop the repeat. So it's at least once, and exactly once with such a provider.
+`tests/integration/reminders.test.ts` runs two workers over 12 reminders and checks 12 distinct sends.
+
+**Why `SKIP LOCKED`, and what went wrong with it?**
+So two workers don't wait on each other: each takes the rows nobody has locked. The bug: I wrote the batch as a
+`LIMIT ... FOR UPDATE SKIP LOCKED` subquery in the `UPDATE`'s `FROM`; the planner put it on the inner side of a nested
+loop and re-ran it once per outer row, so a claim of 3 took all 6 due reminders (EXPLAIN ANALYZE showed `Limit` at
+loops=6). A test that holds one claim open and makes another caught it. Now the batch is a `MATERIALIZED` CTE, run
+once.
+
+**What's a "stage", and what if the worker was down for three weeks?**
+1, 7, 14 and 30 days past due. A late run queues only the highest stage reached (one email, not three), says the real
+number of days overdue, and a lower stage that was queued but never sent is superseded, not sent alongside (both were
+review findings).
+
+**Why is the job per organization?**
+Row-level security needs a tenant per transaction, and the worker has no user. `forEachOrganization` visits each
+organization and binds `withTenant` to it, so every step still sees one tenant, and one tenant's failure is reported
+without stopping the rest.
+
+**How do you test isolation across "every route"?**
+`tests/integration/isolation.test.ts` reads the routes and Server Actions from the file system, so a new one without a
+probe fails the suite. Each is called as the owner of organization B against organization A: A's slug must be the
+404; B's slug with A's ids must be not-found; B's own pages must not contain A's names or emails; A's rows must be
+unchanged. I checked it can fail: removing the members list's tenant filter fails it; a membership lookup that ignored
+the user didn't, at first, because `run`'s re-check still produced the 404, so the suite now also probes page titles,
+which use only the first lookup.
+
 ## What I'd do next, or differently at scale
 
-- Rate-limit sign-in (day 4), and email verification to stop sign-up from revealing accounts.
+- Rate-limit sign-in, and email verification to stop sign-up from revealing accounts.
+- A real email provider behind `Mailer` (one that honours idempotency keys), invitation emails, and a "leave
+  organization" action for members.
 - Refunds and partial payments: new payment and invoice states (PAID can't change today), a refund action for
-  `refund_due` payments; and run reconciliation on a schedule (day 4's background job) instead of by hand.
+  `refund_due` payments.
 - Process webhooks from a queue: answer 200 as soon as the event is stored, apply it in a worker, as Stripe
   recommends at volume. Today the transaction is short enough (measured in the README) to do inline.
 - Credit notes rather than editing a final invoice: a negative document that references the original, numbered in
