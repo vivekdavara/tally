@@ -128,7 +128,8 @@ jobs:
             echo "$image runs as $user"
             test "$user" = node
           done
-          found=$(docker run --rm --entrypoint sh tally-web -c "find / -xdev -name '.env*' -not -path '*/node_modules/*' 2>/dev/null")
+          # As root, so find can read every directory; its exit status (unreadable /proc entries) doesn't matter.
+          found=$(docker run --rm --user root --entrypoint sh tally-web -c "find / -xdev -name '.env*' -not -path '*/node_modules/*' 2>/dev/null; true")
           echo "env files in tally-web: ${found:-none}"
           test -z "$found"
       - run: scripts/db-setup.sh tally_e2e
