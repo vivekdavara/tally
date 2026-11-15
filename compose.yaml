@@ -1,0 +1,60 @@
+# The whole process model on one machine (DESIGN.md, "Deployment"): Postgres, the release step, the web server and the
+# worker, built from the Dockerfile.
+#
+#   AUTH_SECRET=$(openssl rand -base64 32) docker compose up --build      then http://localhost:8117
+#   docker compose run --rm worker node dist/worker.mjs --once           one reminders pass, now
+#   docker compose down -v                                                stop, and delete the database volume
+#
+# For trying the images locally, not for production: the database trusts every connection on the compose network
+# (no passwords, as on a laptop; its port isn't published), and billing runs on the mock provider, which keeps its
+# checkout sessions in the web process (one web replica). CI's "compose" job runs exactly this file.
+
+services:
+  db:
+    # Postgres 14, as in development and CI; pinned by digest (14.24, published 2026-11-05).
+    image: postgres:14.24-bookworm@sha256:f23a2b27c0e11dce0d413c5ceb5ec747257a9961317587794e39c5ec4c49fd5c
+    environment:
+      POSTGRES_HOST_AUTH_METHOD: trust
+    volumes:
+      # Runs once, when the volume is empty: the roles tally_owner and tally_app, and the databases.
+      - ./scripts/db-setup.sh:/docker-entrypoint-initdb.d/10-tally.sh:ro
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      # Over TCP: during its first start the image runs a temporary server on the socket only (to run the script above),
+      # and a socket check would call that ready before anything else can connect.
+      test: ["CMD", "pg_isready", "-h", "127.0.0.1", "-U", "postgres", "-d", "tally"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+
+  # The release step: runs to completion before web and worker start.
+  migrate:
+    build: { context: ., target: migrate }
+    environment:
+      MIGRATE_DATABASE_URL: postgresql://tally_owner@db:5432/tally
+    depends_on:
+      db: { condition: service_healthy }
+
+  web:
+    build: { context: ., target: web }
+    environment:
+      DATABASE_URL: postgresql://tally_app@db:5432/tally
+      AUTH_SECRET: ${AUTH_SECRET:?set AUTH_SECRET first, as the comment at the top of compose.yaml shows}
+      AUTH_TRUST_HOST: "true"
+      BILLING_PROVIDER: mock
+      APP_BASE_URL: http://localhost:8117
+    ports:
+      - "8117:8117"
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+
+  worker:
+    build: { context: ., target: worker }
+    environment:
+      DATABASE_URL: postgresql://tally_app@db:5432/tally
+      APP_BASE_URL: http://localhost:8117
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+
+volumes:
+  pgdata:

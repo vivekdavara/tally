@@ -228,3 +228,39 @@ jobs:
           name: playwright-traces-image
           path: test-results/
           retention-days: 7
+
+  # compose.yaml, the whole process model on one machine: Postgres, the release step, web and worker.
+  compose:
+    name: compose
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - name: docker compose up
+        run: |
+          # Every compose command interpolates the file, so the secret goes into the job's environment.
+          echo "AUTH_SECRET=$(openssl rand -base64 32)" >> "$GITHUB_ENV"
+          AUTH_SECRET=unused-for-the-build docker compose build
+      - name: the release step completes, then the web server is healthy
+        run: |
+          docker compose up -d
+          for i in $(seq 120); do
+            if curl -fsS http://localhost:8117/api/health; then echo; echo "healthy after about $i s"; break; fi
+            sleep 1
+          done
+          curl -fsS http://localhost:8117/api/health
+          test "$(docker inspect -f '{{.State.ExitCode}}' "$(docker compose ps -a -q migrate)")" = 0
+          curl -fsS -o /dev/null http://localhost:8117/signup
+          docker compose ps -a
+      - name: a worker pass
+        run: |
+          docker compose run --rm --no-deps worker node dist/worker.mjs --once > once.log 2>&1 || { cat once.log; exit 1; }
+          cat once.log
+          grep -q '"job":"reminders"' once.log
+      - name: compose logs
+        if: always()
+        run: docker compose logs --no-color | tail -n 200
+      - name: docker compose down
+        if: always()
+        run: docker compose down -v
+
