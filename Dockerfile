@@ -14,9 +14,9 @@
 # Node 24 LTS on Debian 12, pinned by digest (24.22.2, published 2026-11-05).
 ARG NODE_IMAGE=node:24.22.2-bookworm-slim@sha256:01d566e8d94d8c619591d78652babfccd3c6992a3dffa9ed5ab39e11cf6c70e9
 
-# Every dependency, development ones included (the build and the migration tool need them). npm ci's postinstall
-# runs `prisma generate`, which needs only the schema. Prisma's migration engine needs OpenSSL.
-FROM ${NODE_IMAGE} AS deps
+# Node plus OpenSSL, which Prisma's engines need, and the files npm ci reads. npm ci's postinstall runs
+# `prisma generate`, which needs only the schema.
+FROM ${NODE_IMAGE} AS install
 RUN apt-get update \
   && apt-get install -y --no-install-recommends openssl \
   && rm -rf /var/lib/apt/lists/*
@@ -24,6 +24,9 @@ WORKDIR /app
 ENV NEXT_TELEMETRY_DISABLED=1 PRISMA_HIDE_UPDATE_MESSAGE=1 CHECKPOINT_DISABLE=1
 COPY package.json package-lock.json prisma.config.ts ./
 COPY prisma ./prisma
+
+# Every dependency, development ones included: the build needs them.
+FROM install AS deps
 RUN npm ci
 
 # `npm run build`: Next.js's standalone server (.next/standalone, with only the node_modules it traces) and the
@@ -33,8 +36,11 @@ COPY . .
 RUN npm run build
 
 # The release step. Runs `prisma migrate deploy` with MIGRATE_DATABASE_URL (the owner role), then exits. It is the
-# only image that holds the migrations and the only process that should ever get the owner's credentials.
-FROM deps AS migrate
+# only image that holds the migrations and the only process that should ever get the owner's credentials. Its own
+# install, production dependencies only (Prisma's CLI is one, for this image): built on `deps`, with the compilers
+# and test tools the build needs, it was 1.3 GB.
+FROM install AS migrate
+RUN npm ci --omit=dev && npm cache clean --force
 USER node
 CMD ["node_modules/.bin/prisma", "migrate", "deploy"]
 
