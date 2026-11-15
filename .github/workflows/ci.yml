@@ -95,3 +95,113 @@ jobs:
           name: playwright-traces
           path: test-results/
           retention-days: 7
+
+  # The deployment artifacts (Dockerfile, DESIGN.md "Deployment"): build the three images, run the release step, start
+  # the web image and run the whole e2e suite against it, then check the worker image and how both stop.
+  image:
+    name: container image
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    services:
+      postgres:
+        image: postgres:14
+        env:
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 2s --health-timeout 5s --health-retries 30
+    env:
+      APP_URL: postgresql://tally_app@localhost:5432/tally_e2e
+      OWNER_URL: postgresql://tally_owner@localhost:5432/tally_e2e
+    steps:
+      - uses: actions/checkout@v7
+      - name: build the web, worker and migrate images
+        run: |
+          docker build --target migrate -t tally-migrate .
+          docker build --target worker -t tally-worker .
+          docker build -t tally-web .
+          docker image ls --format '{{.Repository}}:{{.Tag}} {{.Size}}' | grep '^tally-'
+      - name: the images run as an unprivileged user and carry no .env file
+        run: |
+          for image in tally-web tally-worker tally-migrate; do
+            user=$(docker inspect -f '{{.Config.User}}' "$image")
+            echo "$image runs as $user"
+            test "$user" = node
+          done
+          found=$(docker run --rm --entrypoint sh tally-web -c "find / -xdev -name '.env*' -not -path '*/node_modules/*' 2>/dev/null")
+          echo "env files in tally-web: ${found:-none}"
+          test -z "$found"
+      - run: scripts/db-setup.sh tally_e2e
+      - name: before the release step, the web image refuses to start
+        run: |
+          set +e
+          timeout 60 docker run --rm --network host -e DATABASE_URL="$APP_URL" -e AUTH_SECRET="$(openssl rand -base64 32)" -e PORT=8199 tally-web > early.log 2>&1
+          status=$?
+          set -e
+          cat early.log
+          test "$status" -eq 1
+      - name: the release step (migrations, as tally_owner)
+        run: docker run --rm --network host -e MIGRATE_DATABASE_URL="$OWNER_URL" tally-migrate
+      - name: the web image refuses the owner role
+        run: |
+          set +e
+          timeout 60 docker run --rm --network host -e DATABASE_URL="$OWNER_URL" -e AUTH_SECRET="$(openssl rand -base64 32)" -e PORT=8199 tally-web > owner.log 2>&1
+          status=$?
+          set -e
+          tail -c 600 owner.log
+          test "$status" -eq 1
+          grep -q "refusing to serve" owner.log
+      - name: start the web image, healthy
+        run: |
+          secret="whsec_e2e_$(openssl rand -hex 24)"
+          echo "E2E_STRIPE_WEBHOOK_SECRET=$secret" >> "$GITHUB_ENV"
+          docker run -d --name web --network host -e DATABASE_URL="$APP_URL" -e AUTH_SECRET="$(openssl rand -base64 32)" \
+            -e AUTH_TRUST_HOST=true -e BILLING_PROVIDER=mock -e STRIPE_WEBHOOK_SECRET="$secret" tally-web
+          for i in $(seq 90); do
+            status=$(docker inspect -f '{{.State.Health.Status}}' web)
+            if [ "$status" = healthy ]; then echo "healthy after about $i s"; break; fi
+            sleep 1
+          done
+          docker inspect -f '{{.State.Health.Status}}' web | grep -qx healthy
+          curl -fsS http://localhost:8117/api/health
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm ci
+      - name: the e2e suite against the web container
+        run: npm run e2e
+        env:
+          E2E_EXTERNAL_SERVER: '1'
+          E2E_ADMIN_DATABASE_URL: postgresql://postgres@localhost:5432/tally_e2e
+      - name: the worker image runs a pass, then stops on SIGTERM with exit 0
+        run: |
+          docker run --rm --network host -e DATABASE_URL="$APP_URL" tally-worker node dist/worker.mjs --once
+          docker run -d --name worker --network host -e DATABASE_URL="$APP_URL" tally-worker
+          for i in $(seq 30); do docker logs worker 2>&1 | grep -q '"job":"reminders"' && break; sleep 1; done
+          start=$(date +%s.%N)
+          docker stop worker
+          end=$(date +%s.%N)
+          docker logs worker
+          code=$(docker inspect -f '{{.State.ExitCode}}' worker)
+          echo "docker stop worker: $(awk "BEGIN { printf \"%.2f\", $end - $start }") s, exit code $code"
+          test "$code" = 0
+      - name: docker stop drains the web server (SIGTERM handled, not killed after 10 s)
+        run: |
+          start=$(date +%s.%N)
+          docker stop web
+          end=$(date +%s.%N)
+          code=$(docker inspect -f '{{.State.ExitCode}}' web)
+          echo "docker stop web: $(awk "BEGIN { printf \"%.2f\", $end - $start }") s, exit code $code"
+          test "$code" = 143
+      - name: container logs
+        if: failure()
+        run: |
+          docker logs web || true
+          docker logs worker || true
+      - uses: actions/upload-artifact@v7
+        if: failure()
+        with:
+          name: playwright-traces-image
+          path: test-results/
+          retention-days: 7
