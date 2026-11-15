@@ -63,6 +63,7 @@ jobs:
           BENCH_FINALIZATIONS=50 BENCH_CONCURRENCY=1,4 BENCH_OUT=$RUNNER_TEMP/bench-finalize.json npm run bench:finalize
           BENCH_EVENTS=50 BENCH_CONCURRENCY=1,4 BENCH_OUT=$RUNNER_TEMP/bench-webhook.json npm run bench:webhook
           BENCH_INVOICES=100 BENCH_RECHECKS=100 BENCH_OUT=$RUNNER_TEMP/bench-reminders.json npm run bench:reminders
+          BENCH_STARTS=1 BENCH_REQUESTS=10 BENCH_DATABASE_URL=postgresql://tally_app@localhost:5432/tally_test npm run bench:startup
 
   e2e:
     name: e2e (chrome)

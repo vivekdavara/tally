@@ -23,6 +23,7 @@
     "bench:finalize": "tsx scripts/bench-finalize.ts",
     "bench:webhook": "tsx scripts/bench-webhook.ts",
     "bench:reminders": "tsx scripts/bench-reminders.ts",
+    "bench:startup": "node scripts/bench-startup.mjs",
     "reconcile": "tsx scripts/reconcile.ts",
     "worker": "tsx scripts/worker.ts",
     "db:setup": "scripts/db-setup.sh",
