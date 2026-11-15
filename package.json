@@ -10,7 +10,8 @@
   },
   "scripts": {
     "dev": "next dev --port 8117",
-    "build": "next build && cp -R .next/static .next/standalone/.next/static",
+    "build": "next build && cp -R .next/static .next/standalone/.next/static && npm run build:worker",
+    "build:worker": "node scripts/build-worker.mjs",
     "start": "PORT=${PORT:-8117} node .next/standalone/server.js",
     "postinstall": "prisma generate",
     "typecheck": "tsc --noEmit",
@@ -45,6 +46,7 @@
     "@types/pg": "8.23.1",
     "@types/react": "19.3.0",
     "@types/react-dom": "19.3.0",
+    "esbuild": "0.28.2",
     "eslint": "9.39.5",
     "eslint-config-next": "16.4.5",
     "prisma": "7.10.1",
