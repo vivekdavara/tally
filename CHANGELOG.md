@@ -41,5 +41,9 @@ The first release: five days of work, one milestone a day (DESIGN.md, "Scope by 
   and `migrate` (the release step, production dependencies only); run as an unprivileged user, no secrets in any
   layer, base image pinned by digest. CI builds them, runs the release step, and runs the e2e suite against the web
   container.
+- `compose.yaml` (Postgres, the release step, web and worker on one machine) and Kubernetes manifests in `deploy/k8s/`
+  (the migration as a Job, readiness on `/api/health`, liveness on the port, non-root with a read-only root
+  filesystem); CI runs the first and deploys the second to a kind cluster.
 - Members can leave an organization (not its last owner).
-- `npm start` and the e2e suite run the standalone server, the same one the image runs.
+- `npm start` and the e2e suite run the standalone server, the same one the image runs; `npm start` reads the env files
+  the way `next start` does.
