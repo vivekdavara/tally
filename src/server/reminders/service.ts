@@ -60,16 +60,21 @@ export interface ClaimedReminder {
  */
 export async function claimReminders(tx: TenantTx, limit = 50): Promise<ClaimedReminder[]> {
   return tx.$queryRawUnsafe<ClaimedReminder[]>(
-    `WITH claimed AS (
+    // The batch is a MATERIALIZED CTE, chosen and locked once. As a subquery in the UPDATE's FROM (the first version)
+    // the planner put it on the inner side of a nested loop and re-ran it for every outer row (EXPLAIN: loops=6), so
+    // LIMIT bounded each re-run, not the claim: one claim of 3 took all 6 due reminders.
+    `WITH batch AS MATERIALIZED (
+       SELECT r2.id FROM reminders r2
+         JOIN invoices i ON i.organization_id = r2.organization_id AND i.id = r2.invoice_id
+        WHERE r2.organization_id = ${TENANT} AND r2.sent_at IS NULL AND r2.attempts < ${MAX_ATTEMPTS}
+          AND r2.next_attempt_at <= clock_timestamp() AND i.status = 'OPEN'
+        ORDER BY r2.next_attempt_at, r2.id
+        LIMIT $1
+          FOR UPDATE OF r2 SKIP LOCKED
+     ), claimed AS (
        UPDATE reminders r
           SET attempts = r.attempts + 1, next_attempt_at = clock_timestamp() + make_interval(secs => ${LEASE_SECONDS})
-         FROM (SELECT r2.id FROM reminders r2
-                 JOIN invoices i ON i.organization_id = r2.organization_id AND i.id = r2.invoice_id
-                WHERE r2.organization_id = ${TENANT} AND r2.sent_at IS NULL AND r2.attempts < ${MAX_ATTEMPTS}
-                  AND r2.next_attempt_at <= clock_timestamp() AND i.status = 'OPEN'
-                ORDER BY r2.next_attempt_at, r2.id
-                LIMIT $1
-                  FOR UPDATE OF r2 SKIP LOCKED) c
+         FROM batch c
         WHERE r.id = c.id
        RETURNING r.id, r.invoice_id, r.stage, r.recipient, r.attempts
      )

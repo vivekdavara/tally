@@ -166,8 +166,33 @@ describe("the job", () => {
     const keys = mailer.sent.map((m) => m.idempotencyKey);
     expect(new Set(keys).size).toBe(12);
     expect(keys).toHaveLength(12);
-    // Both did some of the sending (each batch is claimed with SKIP LOCKED, so neither waited for the other).
-    expect(reports.every((r) => r.sent > 0)).toBe(true);
+  });
+
+  it("claims past another sender's open claim without waiting for it (SKIP LOCKED), and never the same reminder", async () => {
+    const org = await world("skip");
+    const ids = await Promise.all(Array.from({ length: 6 }, () => openInvoice(org)));
+    await Promise.all(ids.map((id) => overdue(id, 1)));
+    await org.run((tx) => queueDueReminders(tx));
+    let release!: () => void;
+    const held = new Promise<void>((r) => (release = r));
+    let claimedFirst!: (ids: string[]) => void;
+    const firstIds = new Promise<string[]>((r) => (claimedFirst = r));
+    // Sender 1 claims 3 and keeps its transaction open.
+    const first = org.run(async (tx) => {
+      claimedFirst((await claimReminders(tx, 3)).map((c) => c.id));
+      await held;
+    });
+    const one = await firstIds;
+    // Sender 2, meanwhile: the other 3 at once, though sender 1's rows are still locked.
+    const started = Date.now();
+    const two = (await org.run((tx) => claimReminders(tx, 10))).map((c) => c.id);
+    const waited = Date.now() - started;
+    release();
+    await first;
+    expect(one).toHaveLength(3);
+    expect(two).toHaveLength(3);
+    expect(one.filter((id) => two.includes(id))).toEqual([]);
+    expect(waited).toBeLessThan(1_000);
   });
 
   it("doesn't send a queued reminder once the invoice is paid", async () => {
