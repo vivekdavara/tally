@@ -1,9 +1,12 @@
 # The whole process model on one machine (DESIGN.md, "Deployment"): Postgres, the release step, the web server and the
 # worker, built from the Dockerfile.
 #
-#   AUTH_SECRET=$(openssl rand -base64 32) docker compose up --build      then http://localhost:8117
-#   docker compose run --rm worker node dist/worker.mjs --once           one reminders pass, now
-#   docker compose down -v                                                stop, and delete the database volume
+#   export AUTH_SECRET=$(openssl rand -base64 32)    every compose command reads this file, so every one needs it
+#   docker compose up --build                         then http://localhost:8117
+#   docker compose run --rm --no-deps worker node dist/worker.mjs --once     one reminders pass, now
+#   docker compose down -v                            stop, and delete the database volume
+#
+# A .env file next to this one also supplies AUTH_SECRET (compose reads it for the ${...} below).
 #
 # For trying the images locally, not for production: the database trusts every connection on the compose network
 # (no passwords, as on a laptop; its port isn't published), and billing runs on the mock provider, which keeps its

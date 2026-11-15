@@ -172,6 +172,8 @@ jobs:
       - name: start the web image, healthy
         run: |
           secret="whsec_e2e_$(openssl rand -hex 24)"
+          # Masked: GitHub prints a step's environment, and $GITHUB_ENV values aren't masked by themselves.
+          echo "::add-mask::$secret"
           echo "E2E_STRIPE_WEBHOOK_SECRET=$secret" >> "$GITHUB_ENV"
           docker run -d --name web --network host -e DATABASE_URL="$APP_URL" -e AUTH_SECRET="$(openssl rand -base64 32)" \
             -e AUTH_TRUST_HOST=true -e BILLING_PROVIDER=mock -e STRIPE_WEBHOOK_SECRET="$secret" tally-web
@@ -202,6 +204,8 @@ jobs:
           grep -q '"worker":"stopped"' once.log
           docker run -d --name worker --network host -e DATABASE_URL="$APP_URL" tally-worker
           for i in $(seq 30); do docker logs worker 2>&1 | grep -q '"job":"reminders"' && break; sleep 1; done
+          docker logs worker > worker-before-stop.log 2>&1
+          grep -q '"job":"reminders"' worker-before-stop.log
           start=$(date +%s.%N)
           docker stop worker
           end=$(date +%s.%N)
@@ -240,7 +244,9 @@ jobs:
       - name: docker compose up
         run: |
           # Every compose command interpolates the file, so the secret goes into the job's environment.
-          echo "AUTH_SECRET=$(openssl rand -base64 32)" >> "$GITHUB_ENV"
+          secret=$(openssl rand -base64 32)
+          echo "::add-mask::$secret"
+          echo "AUTH_SECRET=$secret" >> "$GITHUB_ENV"
           AUTH_SECRET=unused-for-the-build docker compose build
       - name: the release step completes, then the web server is healthy
         run: |
@@ -303,8 +309,10 @@ jobs:
       - name: the release step, as a Job
         run: |
           kubectl apply -f deploy/k8s/config.yaml -f deploy/k8s/migrate-job.yaml
-          kubectl wait --for=condition=complete job/tally-migrate --timeout=240s
-          kubectl logs job/tally-migrate | tail -n 3
+          kubectl wait --for=condition=complete job/tally-migrate-v1-0-0 --timeout=240s
+          kubectl logs job/tally-migrate-v1-0-0 > migrate.log
+          tail -n 3 migrate.log
+          grep -q 'All migrations have been successfully applied' migrate.log
       - name: web and worker roll out (web ready means /api/health answered 200)
         run: |
           kubectl apply -f deploy/k8s/web.yaml -f deploy/k8s/worker.yaml
@@ -315,6 +323,7 @@ jobs:
           kubectl port-forward service/tally-web 18117:80 > port-forward.log 2>&1 &
           for i in $(seq 30); do curl -fsS http://127.0.0.1:18117/api/health && break; sleep 1; done
           echo
+          test "$(curl -fsS http://127.0.0.1:18117/api/health)" = '{"status":"ok"}'
           curl -fsS -o /dev/null -w "/signin %{http_code}\n" http://127.0.0.1:18117/signin
           kill %1
           for i in $(seq 30); do kubectl logs deployment/tally-worker > worker.log; grep -q '"job":"reminders"' worker.log && break; sleep 1; done
@@ -332,10 +341,16 @@ jobs:
           grep -qx 'HOSTNAME=0.0.0.0' hostname.log
           test "$(kubectl exec deployment/tally-web -- node -e 'process.stdout.write(String(process.env.HOSTNAME))')" = 0.0.0.0
           kubectl delete pod hostname-probe
-      - name: a rolling restart replaces the web pod without going unready
+      - name: a rolling restart replaces the web pod
         run: |
+          before=$(kubectl get pods -l app.kubernetes.io/component=web -o jsonpath='{.items[*].metadata.name}')
           kubectl rollout restart deployment/tally-web
           kubectl rollout status deployment/tally-web --timeout=180s
+          kubectl wait --for=delete "pod/$before" --timeout=60s
+          after=$(kubectl get pods -l app.kubernetes.io/component=web -o jsonpath='{.items[*].metadata.name}')
+          echo "before: $before; after: $after"
+          test -n "$after"
+          test "$after" != "$before"
           kubectl get pods -o wide
       - name: diagnostics
         if: failure()
@@ -345,5 +360,5 @@ jobs:
           kubectl describe pods || true
           kubectl logs deployment/tally-web --all-containers || true
           kubectl logs deployment/tally-worker || true
-          kubectl logs job/tally-migrate || true
+          kubectl logs job/tally-migrate-v1-0-0 || true
           kubectl logs deployment/postgres || true

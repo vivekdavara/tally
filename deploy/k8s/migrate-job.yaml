@@ -1,17 +1,29 @@
 # The release step: prisma migrate deploy as tally_owner, once per release, before web and worker change. The only
-# workload that gets the owner role's URL. Two at once are safe (Prisma takes an advisory lock), so a retry is too.
+# workload that gets the owner role's URL.
+#
+# One Job per release: its name carries the version, changed together with the image tag. A Job's pod template can't
+# be changed, so a fixed name would make the next release's apply fail (or, with the same tag, change nothing, and a
+# wait would return at once on the last release's finished Job: review round 4 of day 5). Finished Jobs are deleted
+# after a day.
+#
+# Two at once are safe (Prisma takes an advisory lock), so the retries are: a failure before a migration starts (the
+# database not reachable yet) is retried; a migration that fails partway is recorded as failed, and every later run
+# stops on it (Prisma's P3009) until someone resolves it, so a retry can't apply anything twice. No deadline: killing
+# a long migration partway would leave exactly that state.
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: tally-migrate
+  name: tally-migrate-v1-0-0
 spec:
   backoffLimit: 2
-  activeDeadlineSeconds: 300
+  ttlSecondsAfterFinished: 86400
   template:
     metadata:
       labels: { app.kubernetes.io/name: tally, app.kubernetes.io/component: migrate }
     spec:
       restartPolicy: Never
+      # Nothing here calls the Kubernetes API.
+      automountServiceAccountToken: false
       securityContext:
         runAsNonRoot: true
         runAsUser: 1000
@@ -25,7 +37,12 @@ spec:
               valueFrom: { secretKeyRef: { name: tally-secrets, key: migrate-database-url } }
           securityContext:
             allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
             capabilities: { drop: ["ALL"] }
           resources:
             requests: { cpu: 100m, memory: 256Mi }
             limits: { memory: 512Mi }
+          volumeMounts:
+            - { name: tmp, mountPath: /tmp }
+      volumes:
+        - { name: tmp, emptyDir: { sizeLimit: 64Mi } }

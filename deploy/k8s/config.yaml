@@ -7,7 +7,8 @@
 #     --from-literal=auth-secret="$(openssl rand -base64 32)"
 #
 # (and stripe-secret-key, stripe-webhook-secret with BILLING_PROVIDER=stripe; the web Deployment reads them if set).
-# Apply order: this file, migrate-job.yaml (wait for it to complete), then web.yaml and worker.yaml.
+# Apply order: this file, migrate-job.yaml (wait for it to complete), then web.yaml and worker.yaml. Each release
+# changes the image tags and the migration Job's name together (migrate-job.yaml says why).
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -15,6 +16,7 @@ metadata:
 data:
   # The mock provider keeps checkout sessions in the web process: one replica only. Use stripe for more.
   BILLING_PROVIDER: mock
+  # The public URL: checkout returns there, and reminder emails link to it. Set yours.
   APP_BASE_URL: http://localhost:8117
   # Behind an ingress or load balancer that sets the Host header.
   AUTH_TRUST_HOST: "true"

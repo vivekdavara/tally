@@ -9,6 +9,8 @@ metadata:
 spec:
   # One while BILLING_PROVIDER is mock; any number with stripe (the server keeps nothing else between requests).
   replicas: 1
+  # A rollout starts the new pod before stopping the old one, so for a moment two serve. With stripe that's harmless;
+  # with mock, a checkout session made in one pod isn't found in the other (use type: Recreate if that matters).
   strategy:
     rollingUpdate: { maxUnavailable: 0, maxSurge: 1 }
   selector:
@@ -18,6 +20,8 @@ spec:
       labels: { app.kubernetes.io/name: tally, app.kubernetes.io/component: web }
     spec:
       terminationGracePeriodSeconds: 30
+      # Nothing here calls the Kubernetes API.
+      automountServiceAccountToken: false
       securityContext:
         runAsNonRoot: true
         runAsUser: 1000
@@ -63,8 +67,8 @@ spec:
             - { name: next-cache, mountPath: /app/.next/cache }
             - { name: tmp, mountPath: /tmp }
       volumes:
-        - { name: next-cache, emptyDir: {} }
-        - { name: tmp, emptyDir: {} }
+        - { name: next-cache, emptyDir: { sizeLimit: 256Mi } }
+        - { name: tmp, emptyDir: { sizeLimit: 64Mi } }
 ---
 apiVersion: v1
 kind: Service
